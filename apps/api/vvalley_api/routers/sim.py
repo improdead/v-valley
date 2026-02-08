@@ -357,6 +357,7 @@ def town_tick(town_id: str, req: TickTownRequest) -> dict[str, Any]:
             control_mode=req.control_mode,
             planner=_COGNITION_PLANNER.plan_move,
             agent_autonomy=autonomy_map,
+            cognition_planner=_COGNITION_PLANNER,
         )
         try:
             interaction_ingest = ingest_tick_outcomes(

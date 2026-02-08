@@ -36,7 +36,7 @@ _JSON_SCHEMA_TASKS: dict[str, dict[str, Any]] = {
             "affordance": {"type": "string", "maxLength": 120},
         },
         "required": ["dx", "dy", "reason"],
-        "additionalProperties": True,
+        "additionalProperties": False,
     },
     "short_action": {
         "type": "object",
@@ -46,7 +46,7 @@ _JSON_SCHEMA_TASKS: dict[str, dict[str, Any]] = {
             "reason": {"type": "string", "maxLength": 200},
         },
         "required": ["dx", "dy", "reason"],
-        "additionalProperties": True,
+        "additionalProperties": False,
     },
     "reaction_policy": {
         "type": "object",
@@ -56,7 +56,125 @@ _JSON_SCHEMA_TASKS: dict[str, dict[str, Any]] = {
             "wait_steps": {"type": "integer", "minimum": 0, "maximum": 8},
         },
         "required": ["decision", "reason"],
-        "additionalProperties": True,
+        "additionalProperties": False,
+    },
+    "poignancy": {
+        "type": "object",
+        "properties": {
+            "score": {"type": "integer", "minimum": 1, "maximum": 10},
+        },
+        "required": ["score"],
+        "additionalProperties": False,
+    },
+    "conversation": {
+        "type": "object",
+        "properties": {
+            "utterances": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "speaker": {"type": "string"},
+                        "text": {"type": "string", "maxLength": 300},
+                    },
+                    "required": ["speaker", "text"],
+                    "additionalProperties": False,
+                },
+            },
+            "summary": {"type": "string", "maxLength": 400},
+        },
+        "required": ["utterances", "summary"],
+        "additionalProperties": False,
+    },
+    "focal_points": {
+        "type": "object",
+        "properties": {
+            "questions": {
+                "type": "array",
+                "items": {"type": "string", "maxLength": 200},
+            },
+        },
+        "required": ["questions"],
+        "additionalProperties": False,
+    },
+    "reflection_insights": {
+        "type": "object",
+        "properties": {
+            "insights": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "insight": {"type": "string", "maxLength": 300},
+                        "evidence_indices": {
+                            "type": "array",
+                            "items": {"type": "integer", "minimum": 0},
+                        },
+                    },
+                    "required": ["insight", "evidence_indices"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["insights"],
+        "additionalProperties": False,
+    },
+    "schedule_decomp": {
+        "type": "object",
+        "properties": {
+            "subtasks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string", "maxLength": 200},
+                        "duration_mins": {"type": "integer", "minimum": 1},
+                    },
+                    "required": ["description", "duration_mins"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["subtasks"],
+        "additionalProperties": False,
+    },
+    "conversation_summary": {
+        "type": "object",
+        "properties": {
+            "memo": {"type": "string", "maxLength": 400},
+            "planning_thought": {"type": "string", "maxLength": 400},
+        },
+        "required": ["memo", "planning_thought"],
+        "additionalProperties": False,
+    },
+    "conversation_turn": {
+        "type": "object",
+        "properties": {
+            "utterance": {"type": "string", "maxLength": 300},
+            "end_conversation": {"type": "boolean"},
+        },
+        "required": ["utterance", "end_conversation"],
+        "additionalProperties": False,
+    },
+    "daily_schedule_gen": {
+        "type": "object",
+        "properties": {
+            "schedule": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string", "maxLength": 200},
+                        "duration_mins": {"type": "integer", "minimum": 1},
+                    },
+                    "required": ["description", "duration_mins"],
+                    "additionalProperties": False,
+                },
+            },
+            "currently": {"type": "string", "maxLength": 300},
+        },
+        "required": ["schedule", "currently"],
+        "additionalProperties": False,
     },
 }
 
@@ -210,7 +328,7 @@ def _schema_for_task(task_name: str) -> dict[str, Any] | None:
                 "reason": {"type": "string", "maxLength": 240},
             },
             "required": ["reason"],
-            "additionalProperties": True,
+            "additionalProperties": False,
         }
     return None
 
@@ -329,20 +447,94 @@ def _tier_provider_config(tier: str) -> TierProviderConfig:
     )
 
 
+_TASK_PROMPTS: dict[str, tuple[str, str]] = {
+    "plan_move": (
+        "You are a V-Valley agent movement planner. Return a JSON object with integer dx and dy "
+        "(each -1, 0, or 1), a short reason string, and optionally target_x, target_y, goal_reason, affordance.",
+        "Decide the agent's next movement step based on the context below.\n"
+        "Output: JSON with dx, dy (integers -1..1), reason (string).\n\n"
+    ),
+    "short_action": (
+        "You are a V-Valley agent action planner. Return a JSON object with integer dx and dy "
+        "(each -1, 0, or 1) and a short reason string.",
+        "Decide the agent's next short action step.\n"
+        "Output: JSON with dx, dy (integers -1..1), reason (string).\n\n"
+    ),
+    "reaction_policy": (
+        "You are a V-Valley social reaction evaluator. Decide whether an agent should talk, wait, or ignore "
+        "another nearby agent. Return a JSON object.",
+        "Evaluate whether the agent should initiate conversation.\n"
+        "Output: JSON with decision ('talk', 'wait', or 'ignore'), reason (string), "
+        "and optionally wait_steps (integer 0-8).\n\n"
+    ),
+    "poignancy": (
+        "You are a V-Valley event importance scorer. Rate the importance/poignancy of an event "
+        "on a scale of 1 (mundane) to 10 (life-changing). Return a JSON object.",
+        "Score how important this event is to the agent's life.\n"
+        "1 = routine/mundane, 5 = notable, 10 = life-changing.\n"
+        "Output: JSON with score (integer 1-10).\n\n"
+    ),
+    "conversation": (
+        "You are a V-Valley conversation generator. Create a realistic, memory-grounded conversation "
+        "between two agents. Return a JSON object with utterances and summary.",
+        "Generate a natural conversation between these two agents based on their memories and activities.\n"
+        "Output: JSON with utterances (array of {speaker, text}) and summary (string).\n\n"
+    ),
+    "focal_points": (
+        "You are a V-Valley reflection focal point generator. Given recent memory statements, "
+        "generate 1-3 high-level questions worth reflecting on. Return a JSON object.",
+        "What are the most salient high-level questions the agent should reflect on?\n"
+        "Output: JSON with questions (array of strings, 1-3 questions).\n\n"
+    ),
+    "reflection_insights": (
+        "You are a V-Valley reflection insight synthesizer. Given a focal question and retrieved "
+        "memory statements, generate insights with evidence. Return a JSON object.",
+        "Synthesize insights from the retrieved memories about the focal point.\n"
+        "Output: JSON with insights (array of {insight, evidence_indices}).\n\n"
+    ),
+    "schedule_decomp": (
+        "You are a V-Valley schedule decomposer. Break a schedule block into smaller subtasks "
+        "that sum to the total duration. Return a JSON object.",
+        "Decompose this activity into detailed minute-level subtasks.\n"
+        "The subtask durations must sum to approximately the total duration.\n"
+        "Output: JSON with subtasks (array of {description, duration_mins}).\n\n"
+    ),
+    "conversation_summary": (
+        "You are a V-Valley conversation summarizer. Generate a takeaway memo and a planning thought "
+        "from a completed conversation. Return a JSON object.",
+        "Summarize what the agent should take away from this conversation.\n"
+        "Output: JSON with memo (string, key takeaway) and planning_thought (string, what to do next).\n\n"
+    ),
+    "conversation_turn": (
+        "You are a V-Valley conversation agent. Generate the next utterance for a character in an "
+        "ongoing conversation. Set end_conversation to true if the conversation should naturally end. "
+        "Return a JSON object.",
+        "Generate the next line of dialogue for this character, staying in character and using their "
+        "memories for context. Set end_conversation=true if the exchange has reached a natural end.\n"
+        "Output: JSON with utterance (string) and end_conversation (boolean).\n\n"
+    ),
+    "daily_schedule_gen": (
+        "You are a V-Valley daily schedule planner. Generate a full day schedule for an agent "
+        "based on their personality, goals, and recent experiences. Also update their 'currently' "
+        "status. Return a JSON object.",
+        "Generate a realistic daily schedule (activities with durations summing to 1440 minutes). "
+        "Also provide a short 'currently' string describing the agent's identity and focus.\n"
+        "Output: JSON with schedule (array of {description, duration_mins}) and currently (string).\n\n"
+    ),
+}
+
+_DEFAULT_PROMPT = (
+    "You are the V-Valley cognition engine. "
+    "Return a strict JSON object only, without markdown or commentary. "
+    "Never wrap JSON in code fences.",
+    "Return a JSON object for this task.\n\n",
+)
+
+
 def _build_prompt(*, task_name: str, bounded_context_text: str) -> list[dict[str, str]]:
-    system = (
-        "You are the V-Valley cognition engine. "
-        "Return a strict JSON object only, without markdown or commentary. "
-        "Never wrap JSON in code fences."
-    )
-    user = (
-        f"Task: {task_name}\n"
-        "Output contract:\n"
-        "- Always return a JSON object.\n"
-        "- For movement-related tasks, include integer dx and dy in range -1..1 and a short reason string.\n\n"
-        "Context JSON:\n"
-        f"{bounded_context_text}"
-    )
+    system_text, user_prefix = _TASK_PROMPTS.get(task_name, _DEFAULT_PROMPT)
+    system = f"{system_text} Return strict JSON only, no markdown or code fences."
+    user = f"{user_prefix}Context JSON:\n{bounded_context_text}"
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
@@ -548,7 +740,9 @@ def _post_openai_compatible(
         parsed = _post_chat_completions(config=config, payload=payload, timeout_ms=timeout_ms)
     except ProviderExecutionError as exc:
         # Some OpenAI-compatible providers do not support `response_format`.
-        if response_format and exc.error_code == "http_400" and "response_format" in str(exc).lower():
+        if response_format and exc.error_code == "http_400" and any(
+            hint in str(exc).lower() for hint in ("response_format", "json_schema", "additionalproperties", "strict")
+        ):
             payload.pop("response_format", None)
             parsed = _post_chat_completions(config=config, payload=payload, timeout_ms=timeout_ms)
         else:

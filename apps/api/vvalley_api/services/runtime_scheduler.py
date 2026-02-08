@@ -197,6 +197,7 @@ class TownRuntimeScheduler:
                     control_mode=control_mode,
                     planner=self._planner.plan_move,
                     agent_autonomy=autonomy_map,
+                    cognition_planner=self._planner,
                 )
                 try:
                     ingest_tick_outcomes(

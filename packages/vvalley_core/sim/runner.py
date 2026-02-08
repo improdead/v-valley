@@ -558,6 +558,151 @@ class SimulationRunner:
     def _adjacent(a: NpcState, b: NpcState) -> bool:
         return abs(a.x - b.x) + abs(a.y - b.y) <= 1
 
+    def _generate_conversation_content(
+        self, *, a: NpcState, b: NpcState, step: int, town: TownRuntime
+    ) -> tuple[str, list[list[str]]]:
+        """Generate conversation using iterative turn-taking with per-turn memory retrieval."""
+        cognition = getattr(a.memory, "cognition", None)
+        if cognition is None:
+            return (
+                self._social_message(a=a, b=b, step=step),
+                self._social_transcript(a=a, b=b, step=step),
+            )
+
+        # Check if cognition supports turn-taking
+        has_turn_method = hasattr(cognition, "generate_conversation_turn")
+        if not has_turn_method:
+            return self._generate_conversation_single_shot(
+                a=a, b=b, step=step, town=town, cognition=cognition
+            )
+
+        try:
+            return self._generate_conversation_iterative(
+                a=a, b=b, step=step, town=town, cognition=cognition
+            )
+        except Exception:
+            pass
+
+        # Final fallback
+        return (
+            self._social_message(a=a, b=b, step=step),
+            self._social_transcript(a=a, b=b, step=step),
+        )
+
+    def _generate_conversation_iterative(
+        self,
+        *,
+        a: NpcState,
+        b: NpcState,
+        step: int,
+        town: TownRuntime,
+        cognition: Any,
+    ) -> tuple[str, list[list[str]]]:
+        """GA-style iterative turn-taking: each agent speaks in turn with per-turn retrieval."""
+        max_turns = 8
+        transcript: list[list[str]] = []
+        speakers = [a, b]
+        clock = self._clock_for_runtime(town=town)
+
+        for turn in range(max_turns):
+            current = speakers[turn % 2]
+            partner = speakers[(turn + 1) % 2]
+
+            # Per-turn memory retrieval grounded on conversation so far
+            if transcript:
+                focal = transcript[-1][1]  # last utterance
+            else:
+                focal = partner.name
+            retrieved = current.memory.retrieve_ranked(focal_text=focal, step=step, limit=3)
+            memories = [str(item.get("description", "")) for item in retrieved[:3]]
+
+            transcript_so_far = "\n".join(f"{s}: {t}" for s, t in transcript[-6:])
+
+            result = cognition.generate_conversation_turn({
+                "speaking_agent_name": current.name,
+                "speaking_agent_id": current.agent_id,
+                "partner_name": partner.name,
+                "partner_id": partner.agent_id,
+                "speaking_agent_activity": current.memory.scratch.act_description or "their routine",
+                "partner_activity": partner.memory.scratch.act_description or "their routine",
+                "speaking_agent_memories": memories,
+                "relationship_score": round(
+                    current.memory.relationship_scores.get(partner.agent_id, 0.0), 2
+                ),
+                "transcript_so_far": transcript_so_far,
+                "turn_number": turn,
+                "time_of_day": str(clock.get("phase", "day")),
+                "town_id": town.town_id,
+                "step": step,
+            })
+
+            utterance = str(result.get("utterance") or "").strip()
+            if not utterance:
+                break
+            transcript.append([current.name, utterance])
+
+            if result.get("end_conversation", False):
+                break
+
+        if not transcript:
+            return (
+                self._social_message(a=a, b=b, step=step),
+                self._social_transcript(a=a, b=b, step=step),
+            )
+
+        summary = f"{a.name} and {b.name} had a conversation ({len(transcript)} turns)."
+        return (summary, transcript)
+
+    def _generate_conversation_single_shot(
+        self,
+        *,
+        a: NpcState,
+        b: NpcState,
+        step: int,
+        town: TownRuntime,
+        cognition: Any,
+    ) -> tuple[str, list[list[str]]]:
+        """Single-shot conversation generation (legacy path)."""
+        try:
+            a_retrieved = a.memory.retrieve_ranked(focal_text=b.name, step=step, limit=5)
+            b_retrieved = b.memory.retrieve_ranked(focal_text=a.name, step=step, limit=5)
+            a_memories = [str(item.get("description", "")) for item in a_retrieved[:3]]
+            b_memories = [str(item.get("description", "")) for item in b_retrieved[:3]]
+            a_relationship = a.memory.relationship_scores.get(b.agent_id, 0.0)
+            b_relationship = b.memory.relationship_scores.get(a.agent_id, 0.0)
+            clock = self._clock_for_runtime(town=town)
+
+            result = cognition.generate_conversation({
+                "agent_a_name": a.name,
+                "agent_b_name": b.name,
+                "agent_a_activity": a.memory.scratch.act_description or "their routine",
+                "agent_b_activity": b.memory.scratch.act_description or "their routine",
+                "agent_a_memories": a_memories,
+                "agent_b_memories": b_memories,
+                "relationship_score": round((a_relationship + b_relationship) / 2.0, 2),
+                "time_of_day": str(clock.get("phase", "day")),
+                "town_id": town.town_id,
+                "step": step,
+            })
+            if result.get("route") != "heuristic":
+                utterances = result.get("utterances") or []
+                summary = str(result.get("summary") or "")
+                if utterances:
+                    transcript = [
+                        [str(u.get("speaker", a.name)), str(u.get("text", ""))]
+                        for u in utterances if isinstance(u, dict)
+                    ]
+                    if transcript:
+                        message = summary or f"{a.name} and {b.name} had a conversation."
+                        return (message, transcript)
+        except Exception:
+            pass
+
+        return (
+            self._social_message(a=a, b=b, step=step),
+            self._social_transcript(a=a, b=b, step=step),
+        )
+
     def _social_message(self, *, a: NpcState, b: NpcState, step: int) -> str:
         a_focus = a.memory.scratch.act_description or "their routine"
         b_focus = b.memory.scratch.act_description or "their routine"
@@ -651,6 +796,7 @@ class SimulationRunner:
                     if len(out) >= self.max_social_events_per_step:
                         return out
                     continue
+                message, transcript = self._generate_conversation_content(a=a, b=b, step=step, town=town)
                 out.append(
                     {
                         "step": step,
@@ -659,8 +805,8 @@ class SimulationRunner:
                             {"agent_id": a.agent_id, "name": a.name, "x": a.x, "y": a.y},
                             {"agent_id": b.agent_id, "name": b.name, "x": b.x, "y": b.y},
                         ],
-                        "message": self._social_message(a=a, b=b, step=step),
-                        "transcript": self._social_transcript(a=a, b=b, step=step),
+                        "message": message,
+                        "transcript": transcript,
                         "reaction": reaction,
                     }
                 )
@@ -1118,6 +1264,7 @@ class SimulationRunner:
                 continue
             seen_signatures.add(signature)
             desc = f"{other.name} is {other.status} near ({other.x},{other.y})."
+            poignancy = npc.memory.score_event_poignancy(description=desc, event_type="perception")
             npc.memory.add_node(
                 kind="event",
                 step=step,
@@ -1125,7 +1272,7 @@ class SimulationRunner:
                 predicate="is",
                 object=other.status,
                 description=desc,
-                poignancy=3,
+                poignancy=poignancy,
                 evidence_ids=(),
                 decrement_trigger=True,
             )
@@ -1399,29 +1546,12 @@ class SimulationRunner:
             partner = town.npcs.get(partner_id) if partner_id else None
             partner_name = partner.name if partner is not None else str(partner_id or "someone")
             npc.memory.scratch.chatting_with_buffer[partner_name] = int(closed_step) + 4
-            turns = max(0, int(session.turns))
-            last_message = str(session.last_message or "").strip()
-            if len(last_message) > 180:
-                last_message = f"{last_message[:177]}..."
-            summary = f"{npc.name} wraps up a conversation with {partner_name}"
-            if turns > 0:
-                summary += f" after {turns} turns"
-            if last_message:
-                summary += f". Last exchange: {last_message}"
-            else:
-                summary += "."
-            npc.memory.add_node(
-                kind="thought",
-                step=closed_step,
-                subject=npc.name,
-                predicate="conversation_wrap_up",
-                object=partner_name,
-                description=summary,
-                poignancy=3,
-                evidence_ids=tuple(npc.memory.seq_chat[:2]),
-                decrement_trigger=False,
-                expiration_step=int(closed_step) + (24 * 2),
-            )
+            # Conversation summary is handled by memory._conversation_follow_up_thought()
+            # which fires on the next tick when chatting_end_step is reached, producing
+            # memo + planning thought nodes and clearing scratch chat state.
+            # Setting chatting_end_step here ensures the follow-up triggers properly.
+            if npc.memory.scratch.chatting_end_step is None or int(npc.memory.scratch.chatting_end_step) > closed_step:
+                npc.memory.scratch.chatting_end_step = closed_step
 
     def _conversation_for_agent(self, *, town: TownRuntime, agent_id: str) -> ConversationSession | None:
         normalized_agent = str(agent_id)
@@ -1531,6 +1661,7 @@ class SimulationRunner:
         b = town.npcs.get(session.agent_b)
         if a is None or b is None:
             return None
+        message, transcript = self._generate_conversation_content(a=a, b=b, step=step, town=town)
         return {
             "step": int(step),
             "type": "social",
@@ -1538,8 +1669,8 @@ class SimulationRunner:
                 {"agent_id": a.agent_id, "name": a.name, "x": a.x, "y": a.y},
                 {"agent_id": b.agent_id, "name": b.name, "x": b.x, "y": b.y},
             ],
-            "message": self._social_message(a=a, b=b, step=step),
-            "transcript": self._social_transcript(a=a, b=b, step=step),
+            "message": message,
+            "transcript": transcript,
             "source": source,
             "conversation_session_id": session.session_id,
         }
@@ -2065,6 +2196,11 @@ class SimulationRunner:
                 if not isinstance(row, (list, tuple)) or len(row) != 2:
                     continue
                 transcript.append((str(row[0]), str(row[1])))
+
+            # Estimate conversation duration from transcript length
+            total_chars = sum(len(line) for _, line in transcript)
+            convo_duration_mins = max(10, total_chars // 30)
+
             a.memory.add_social_interaction(
                 step=step,
                 target_agent_id=b.agent_id,
@@ -2078,6 +2214,18 @@ class SimulationRunner:
                 target_name=a.name,
                 message=message,
                 transcript=transcript,
+            )
+
+            # Recompose schedules for both participants after chat interruption
+            a.memory.recompose_schedule_after_interruption(
+                step=step,
+                inserted_description=f"chatting with {b.name}",
+                inserted_duration_mins=convo_duration_mins,
+            )
+            b.memory.recompose_schedule_after_interruption(
+                step=step,
+                inserted_description=f"chatting with {a.name}",
+                inserted_duration_mins=convo_duration_mins,
             )
 
     def _run_reflection_cycle(self, *, town: TownRuntime, step: int) -> list[dict[str, Any]]:
@@ -2336,6 +2484,7 @@ class SimulationRunner:
         control_mode: str = "external",
         planner: Optional[PlannerFn] = None,
         agent_autonomy: dict[str, dict[str, Any]] | None = None,
+        cognition_planner: Any = None,
     ) -> dict[str, Any]:
         runtime = self.sync_town(
             town_id=town_id,
@@ -2343,6 +2492,12 @@ class SimulationRunner:
             map_data=map_data,
             members=members,
         )
+
+        # Wire cognition planner into all NPC memory instances
+        if cognition_planner is not None:
+            for npc in runtime.npcs.values():
+                npc.memory.cognition = cognition_planner
+                npc.memory.town_id = town_id
 
         mode = self._normalize_control_mode(control_mode)
         events: list[dict[str, Any]] = []
@@ -2403,7 +2558,11 @@ class SimulationRunner:
                     runtime.autonomy_tick_counts[agent_id] = 0
 
                 if autopilot_enabled:
-                    npc.memory.maybe_refresh_plans(step=runtime.step, scope=planning_scope)
+                    npc.memory.maybe_refresh_plans(
+                        step=runtime.step,
+                        scope=planning_scope,
+                        step_minutes=max(1, int(runtime.step_minutes)),
+                    )
 
                 perception = self._perceive_nearby_agents(town=runtime, npc=npc, step=runtime.step)
                 focal_parts: list[str] = [planning_scope]
@@ -3103,6 +3262,10 @@ class SimulationRunner:
             if mode in {"autopilot", "hybrid"}:
                 step_reflections = self._run_reflection_cycle(town=runtime, step=runtime.step)
                 reflection_events.extend(step_reflections)
+            else:
+                # Conversation follow-ups must fire in all modes (including external)
+                for npc in sorted(runtime.npcs.values(), key=lambda n: n.agent_id):
+                    npc.memory._conversation_follow_up_thought(step=runtime.step)
 
         runtime.recent_events.extend(events)
         runtime.recent_events.extend(social_events)
@@ -3225,6 +3388,7 @@ def tick_simulation(
     control_mode: str = "external",
     planner: Optional[PlannerFn] = None,
     agent_autonomy: dict[str, dict[str, Any]] | None = None,
+    cognition_planner: Any = None,
 ) -> dict[str, Any]:
     with _RUNNER_LOCK:
         return _RUNNER.tick(
@@ -3237,4 +3401,5 @@ def tick_simulation(
             control_mode=control_mode,
             planner=planner,
             agent_autonomy=agent_autonomy,
+            cognition_planner=cognition_planner,
         )

@@ -186,13 +186,17 @@ class ScheduleItem:
     description: str
     duration_mins: int
     affordance_hint: str | None = None
+    decomposed: bool = False
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        d: dict[str, object] = {
             "description": self.description,
             "duration_mins": int(self.duration_mins),
             "affordance_hint": self.affordance_hint,
         }
+        if self.decomposed:
+            d["decomposed"] = True
+        return d
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "ScheduleItem":
@@ -206,6 +210,7 @@ class ScheduleItem:
             description=str(raw.get("description") or "idle"),
             duration_mins=max(1, duration_mins),
             affordance_hint=(str(raw.get("affordance_hint")) if raw.get("affordance_hint") is not None else None),
+            decomposed=bool(raw.get("decomposed", False)),
         )
 
 
@@ -245,6 +250,9 @@ class AgentScratch:
     chat: list[tuple[str, str]] = field(default_factory=list)
     chatting_with_buffer: dict[str, int] = field(default_factory=dict)
     chatting_end_step: int | None = None
+
+    currently: str | None = None
+    last_day_index: int = -1
 
     next_daily_plan_step: int = 0
     next_long_term_plan_step: int = 0
@@ -326,6 +334,8 @@ class AgentScratch:
             "chat": [[speaker, utterance] for speaker, utterance in self.chat],
             "chatting_with_buffer": dict(self.chatting_with_buffer),
             "chatting_end_step": self.chatting_end_step,
+            "currently": self.currently,
+            "last_day_index": int(self.last_day_index),
             "next_daily_plan_step": int(self.next_daily_plan_step),
             "next_long_term_plan_step": int(self.next_long_term_plan_step),
         }
@@ -357,6 +367,8 @@ class AgentScratch:
             act_path_set=bool(raw.get("act_path_set") or False),
             chatting_with=(str(raw.get("chatting_with")) if raw.get("chatting_with") is not None else None),
             chatting_end_step=(int(raw["chatting_end_step"]) if raw.get("chatting_end_step") is not None else None),
+            currently=(str(raw.get("currently")) if raw.get("currently") is not None else None),
+            last_day_index=int(raw.get("last_day_index") or -1),
             next_daily_plan_step=max(0, int(raw.get("next_daily_plan_step") or 0)),
             next_long_term_plan_step=max(0, int(raw.get("next_long_term_plan_step") or 0)),
         )
@@ -469,6 +481,9 @@ class SpatialMemoryTree:
         return cls(tree=tree)
 
 
+CognitionFn = Any  # Optional: CognitionPlanner instance or None
+
+
 @dataclass
 class AgentMemory:
     """Per-agent memory state for simulation ticks."""
@@ -490,6 +505,8 @@ class AgentMemory:
     kw_strength_thought: dict[str, int] = field(default_factory=dict)
     known_places: dict[str, int] = field(default_factory=dict)
     relationship_scores: dict[str, float] = field(default_factory=dict)
+    cognition: CognitionFn = field(default=None, repr=False)
+    town_id: str | None = field(default=None, repr=False)
 
     @property
     def retention(self) -> int:
@@ -709,13 +726,57 @@ class AgentMemory:
         return "short_action"
 
     def _decomposed_schedule_action(self, *, step: int, scope: str) -> tuple[str, str | None]:
-        schedule_item, _, offset = self.scratch.current_schedule_state(step=step, step_minutes=10)
+        schedule_item, idx, offset = self.scratch.current_schedule_state(step=step, step_minutes=10)
         if schedule_item is None:
             return ("roaming", None)
 
         desc = str(schedule_item.description)
         duration = max(1, int(schedule_item.duration_mins))
         normalized_scope = self._normalize_scope(scope)
+
+        # Try LLM decomposition for blocks >= 60 mins that haven't been decomposed yet
+        if (
+            self.cognition is not None
+            and normalized_scope in {"short_action", "daily_plan"}
+            and duration >= 60
+            and desc.lower() not in {"sleep", "sleeping"}
+            and not schedule_item.decomposed
+        ):
+            try:
+                result = self.cognition.decompose_schedule({
+                    "agent_id": self.agent_id,
+                    "agent_name": self.agent_name,
+                    "town_id": self.town_id or "",
+                    "task_description": desc,
+                    "total_duration_mins": duration,
+                    "current_offset_mins": offset,
+                    "daily_requirements": self.scratch.daily_req[:3],
+                    "long_term_goals": self.scratch.long_term_goals[:2],
+                })
+                subtasks = result.get("subtasks") or []
+                if subtasks and result.get("route") != "heuristic":
+                    # Replace the current schedule item with decomposed subtasks
+                    new_items: list[ScheduleItem] = []
+                    total_sub = 0
+                    for sub in subtasks:
+                        if not isinstance(sub, dict):
+                            continue
+                        sub_desc = str(sub.get("description") or desc)
+                        sub_dur = max(1, int(sub.get("duration_mins") or 10))
+                        new_items.append(ScheduleItem(sub_desc, sub_dur, schedule_item.affordance_hint))
+                        total_sub += sub_dur
+                    if new_items and abs(total_sub - duration) <= duration * 0.2:
+                        for item in new_items:
+                            item.decomposed = True
+                        self.scratch.daily_schedule[idx:idx + 1] = new_items
+                        # Recalculate current position after decomposition
+                        new_item, _, new_offset = self.scratch.current_schedule_state(step=step, step_minutes=10)
+                        if new_item is not None:
+                            return (str(new_item.description), new_item.affordance_hint)
+            except Exception:
+                pass
+
+        # Deterministic fallback: 3-phase split for long activities
         if normalized_scope in {"short_action", "daily_plan"} and duration >= 90:
             progress = float(offset) / float(duration)
             if progress < 0.33:
@@ -725,9 +786,16 @@ class AgentMemory:
             return (f"wrap up {desc}", schedule_item.affordance_hint)
         return (desc, schedule_item.affordance_hint)
 
-    def maybe_refresh_plans(self, *, step: int, scope: str) -> list[MemoryNode]:
+    def maybe_refresh_plans(self, *, step: int, scope: str, step_minutes: int = 10) -> list[MemoryNode]:
         created: list[MemoryNode] = []
         normalized_scope = self._normalize_scope(scope)
+
+        # Day-boundary detection: generate new daily schedule via LLM
+        day_minutes = max(1, self.scratch.day_minutes)
+        current_day_index = (int(step) * int(step_minutes)) // day_minutes
+        if current_day_index > self.scratch.last_day_index:
+            self.scratch.last_day_index = current_day_index
+            created.extend(self._generate_daily_schedule(step=step))
 
         if step >= int(self.scratch.next_daily_plan_step):
             action_desc, affordance = self._decomposed_schedule_action(step=step, scope=normalized_scope)
@@ -772,6 +840,99 @@ class AgentMemory:
 
         return created
 
+    def _generate_daily_schedule(self, *, step: int) -> list[MemoryNode]:
+        """Generate a new daily schedule via LLM at day boundaries (GA's revise_identity + generate_hourly_schedule)."""
+        created: list[MemoryNode] = []
+        if self.cognition is None:
+            return created
+
+        try:
+            # Gather context for schedule generation
+            recent_thoughts = [
+                node.description for node in self.nodes[:8]
+                if node.kind in {"thought", "reflection"} and "idle" not in node.embedding_key.lower()
+            ][:4]
+            recent_events = [
+                node.description for node in self.nodes[:12]
+                if node.kind == "event" and "idle" not in node.embedding_key.lower()
+            ][:4]
+            top_rels = self.top_relationships(limit=3)
+            rel_names = [str(r.get("agent_id", "")) for r in top_rels]
+
+            result = self.cognition.generate_daily_schedule({
+                "agent_id": self.agent_id,
+                "agent_name": self.agent_name,
+                "town_id": self.town_id or "",
+                "daily_requirements": self.scratch.daily_req[:5],
+                "long_term_goals": self.scratch.long_term_goals[:3],
+                "recent_thoughts": recent_thoughts,
+                "recent_events": recent_events,
+                "known_places": list(self.known_places.keys())[:6],
+                "relationships": rel_names,
+                "previous_currently": self.scratch.currently or "",
+                "step": step,
+            })
+
+            if result.get("route") == "heuristic":
+                return created
+
+            # Update daily schedule
+            schedule_items = result.get("schedule") or []
+            if schedule_items:
+                new_schedule: list[ScheduleItem] = []
+                total = 0
+                for item in schedule_items:
+                    if not isinstance(item, dict):
+                        continue
+                    desc = str(item.get("description") or "idle")
+                    dur = max(1, int(item.get("duration_mins") or 60))
+                    new_schedule.append(ScheduleItem(desc, dur))
+                    total += dur
+                # Accept if total is within 10% of day length
+                day_mins = self.scratch.day_minutes
+                if new_schedule and abs(total - day_mins) <= day_mins * 0.1:
+                    self.scratch.daily_schedule = new_schedule
+                    self.scratch.daily_schedule_hourly_original = list(new_schedule)
+
+            # Update identity/currently (GA's revise_identity)
+            currently = str(result.get("currently") or "").strip()
+            if currently:
+                old_currently = self.scratch.currently or ""
+                self.scratch.currently = currently
+                created.append(
+                    self.add_node(
+                        kind="thought",
+                        step=step,
+                        subject=self.agent_name,
+                        predicate="revises_identity",
+                        object="self",
+                        description=f"{self.agent_name}'s new focus: {currently}",
+                        poignancy=5,
+                        evidence_ids=tuple(self.seq_thought[:2]),
+                        decrement_trigger=False,
+                        expiration_step=int(step) + (24 * 6),
+                    )
+                )
+
+            created.append(
+                self.add_node(
+                    kind="thought",
+                    step=step,
+                    subject=self.agent_name,
+                    predicate="generates_daily_plan",
+                    object="new_day",
+                    description=f"{self.agent_name} plans a new day with {len(self.scratch.daily_schedule)} activities.",
+                    poignancy=4,
+                    evidence_ids=(),
+                    decrement_trigger=False,
+                    expiration_step=int(step) + (24 * 2),
+                )
+            )
+        except Exception:
+            pass
+
+        return created
+
     def planned_action_description(self, *, step: int, scope: str, fallback: str | None = None) -> str:
         action_desc, _ = self._decomposed_schedule_action(step=step, scope=scope)
         if action_desc and action_desc != "roaming":
@@ -811,6 +972,113 @@ class AgentMemory:
             evidence_ids=(),
             decrement_trigger=True,
         )
+
+    def score_event_poignancy(self, *, description: str, event_type: str = "event") -> int:
+        """Score an event's importance using LLM if available, else heuristic."""
+        if self.cognition is not None:
+            try:
+                result = self.cognition.score_poignancy({
+                    "agent_id": self.agent_id,
+                    "agent_name": self.agent_name,
+                    "town_id": self.town_id or "",
+                    "description": description,
+                    "event_type": event_type,
+                })
+                score = int(result.get("score") or 3)
+                if result.get("route") != "heuristic":
+                    return max(1, min(10, score))
+            except Exception:
+                pass
+        # Deterministic fallback
+        lower = description.lower()
+        if "idle" in lower or "sleeping" in lower:
+            return 1
+        if any(kw in lower for kw in ("chat", "talk", "convers")):
+            return 4
+        if any(kw in lower for kw in ("reflect", "plan", "goal")):
+            return 5
+        return 3
+
+    def recompose_schedule_after_interruption(
+        self,
+        *,
+        step: int,
+        inserted_description: str,
+        inserted_duration_mins: int,
+    ) -> None:
+        """Recompose the remaining daily schedule after a chat or wait interruption."""
+        _, idx, offset = self.scratch.current_schedule_state(step=step, step_minutes=10)
+        if idx < 0 or idx >= len(self.scratch.daily_schedule):
+            return
+
+        current_item = self.scratch.daily_schedule[idx]
+        remaining_in_block = max(0, int(current_item.duration_mins) - offset)
+
+        # Insert the interruption activity into the schedule
+        interrupted_items: list[ScheduleItem] = []
+        if offset > 0:
+            # Partial completion of current activity
+            interrupted_items.append(ScheduleItem(
+                f"interrupted: {current_item.description}",
+                offset,
+                current_item.affordance_hint,
+            ))
+        interrupted_items.append(ScheduleItem(
+            inserted_description,
+            inserted_duration_mins,
+            "social",
+        ))
+
+        # Try LLM recomposition for remaining time
+        if self.cognition is not None and remaining_in_block > 0:
+            try:
+                remaining_schedule = self.scratch.daily_schedule[idx + 1:]
+                remaining_descs = [
+                    f"{item.description} ({item.duration_mins}m)"
+                    for item in remaining_schedule[:4]
+                ]
+                result = self.cognition.decompose_schedule({
+                    "agent_id": self.agent_id,
+                    "agent_name": self.agent_name,
+                    "town_id": self.town_id or "",
+                    "task_description": f"remainder of {current_item.description}",
+                    "total_duration_mins": remaining_in_block,
+                    "current_offset_mins": 0,
+                    "interruption": inserted_description,
+                    "upcoming_schedule": remaining_descs,
+                })
+                subtasks = result.get("subtasks") or []
+                if subtasks and result.get("route") != "heuristic":
+                    new_recomp_items: list[ScheduleItem] = []
+                    total_recomp = 0
+                    for sub in subtasks:
+                        if not isinstance(sub, dict):
+                            continue
+                        sub_dur = max(1, int(sub.get("duration_mins") or remaining_in_block))
+                        new_recomp_items.append(ScheduleItem(
+                            str(sub.get("description") or current_item.description),
+                            sub_dur,
+                            current_item.affordance_hint,
+                        ))
+                        total_recomp += sub_dur
+                    # Only accept if total duration is within 20% tolerance
+                    if new_recomp_items and abs(total_recomp - remaining_in_block) <= remaining_in_block * 0.2:
+                        for item in new_recomp_items:
+                            item.decomposed = True
+                        interrupted_items.extend(new_recomp_items)
+                        self.scratch.daily_schedule[idx:idx + 1] = interrupted_items
+                        return
+            except Exception:
+                pass
+
+        # Deterministic fallback: just insert and keep remaining as-is
+        if remaining_in_block > inserted_duration_mins:
+            interrupted_items.append(ScheduleItem(
+                f"resume {current_item.description}",
+                remaining_in_block - inserted_duration_mins,
+                current_item.affordance_hint,
+            ))
+        self.scratch.daily_schedule[idx:idx + 1] = interrupted_items
 
     def top_relationships(self, *, limit: int = 3) -> list[dict[str, object]]:
         ranked = sorted(
@@ -888,10 +1156,34 @@ class AgentMemory:
             )
         return out
 
-    def _reflection_focal_points(self) -> list[str]:
+    def _reflection_focal_points(self, *, step: int = 0) -> list[str]:
         candidates = self.nodes[: max(8, min(32, len(self.nodes)))]
         if not candidates:
             return []
+
+        # Try LLM-based focal point generation
+        if self.cognition is not None:
+            try:
+                recent_n = max(1, min(len(candidates), self.scratch.importance_ele_n or 8))
+                recent = candidates[:recent_n]
+                statements = "\n".join(
+                    f"{i}. {node.description}" for i, node in enumerate(recent) if "idle" not in node.embedding_key.lower()
+                )
+                if statements:
+                    result = self.cognition.generate_focal_points({
+                        "agent_id": self.agent_id,
+                        "agent_name": self.agent_name,
+                        "town_id": self.town_id or "",
+                        "recent_statements": statements,
+                        "step": step,
+                    })
+                    questions = result.get("questions") or []
+                    if questions and result.get("route") != "heuristic":
+                        return [str(q) for q in questions[:3] if str(q).strip()]
+            except Exception:
+                pass
+
+        # Deterministic fallback: keyword frequency
         keyword_counter: Counter[str] = Counter()
         for node in candidates:
             keyword_counter.update(node.keywords[:4])
@@ -900,36 +1192,142 @@ class AgentMemory:
             return top_keywords[:3]
         return [node.description for node in candidates[:3]]
 
-    def _conversation_follow_up_thought(self, *, step: int) -> MemoryNode | None:
+    def _conversation_follow_up_thought(self, *, step: int) -> list[MemoryNode]:
         end_step = self.scratch.chatting_end_step
         if end_step is None or int(step) < int(end_step):
-            return None
+            return []
         if not self.scratch.chat:
-            return None
+            return []
+
+        partner = self.scratch.chatting_with or "chat"
         convo_excerpt = " | ".join(f"{speaker}: {line}" for speaker, line in self.scratch.chat[-4:])
-        node = self.add_node(
-            kind="thought",
-            step=step,
-            subject=self.agent_name,
-            predicate="memo_on_chat",
-            object=self.scratch.chatting_with or "chat",
-            description=f"{self.agent_name} notes from recent chat: {convo_excerpt}",
-            poignancy=4,
-            evidence_ids=tuple(self.seq_chat[:2]),
-            decrement_trigger=False,
-            expiration_step=int(step) + (24 * 6),
-        )
+        created: list[MemoryNode] = []
+        chat_evidence = tuple(self.seq_chat[:2])
+
+        # Try LLM-based conversation summary
+        if self.cognition is not None:
+            try:
+                full_transcript = "\n".join(f"{speaker}: {line}" for speaker, line in self.scratch.chat)
+                result = self.cognition.summarize_conversation({
+                    "agent_id": self.agent_id,
+                    "agent_name": self.agent_name,
+                    "town_id": self.town_id or "",
+                    "partner_name": partner,
+                    "transcript": full_transcript,
+                    "step": step,
+                })
+                memo = str(result.get("memo") or "").strip()
+                planning = str(result.get("planning_thought") or "").strip()
+                if memo and result.get("route") != "heuristic":
+                    created.append(
+                        self.add_node(
+                            kind="thought",
+                            step=step,
+                            subject=self.agent_name,
+                            predicate="memo_on_chat",
+                            object=partner,
+                            description=f"{self.agent_name} takeaway: {memo}",
+                            poignancy=4,
+                            evidence_ids=chat_evidence,
+                            decrement_trigger=False,
+                            expiration_step=int(step) + (24 * 6),
+                        )
+                    )
+                if planning and result.get("route") != "heuristic":
+                    created.append(
+                        self.add_node(
+                            kind="thought",
+                            step=step,
+                            subject=self.agent_name,
+                            predicate="plans_from_chat",
+                            object=partner,
+                            description=f"For {self.agent_name}'s planning: {planning}",
+                            poignancy=4,
+                            evidence_ids=chat_evidence,
+                            decrement_trigger=False,
+                            expiration_step=int(step) + (24 * 4),
+                        )
+                    )
+            except Exception:
+                pass
+
+        # Deterministic fallback if LLM didn't produce nodes
+        if not created:
+            created.append(
+                self.add_node(
+                    kind="thought",
+                    step=step,
+                    subject=self.agent_name,
+                    predicate="memo_on_chat",
+                    object=partner,
+                    description=f"{self.agent_name} notes from recent chat: {convo_excerpt}",
+                    poignancy=4,
+                    evidence_ids=chat_evidence,
+                    decrement_trigger=False,
+                    expiration_step=int(step) + (24 * 6),
+                )
+            )
+
         self.scratch.chat = []
         self.scratch.chatting_with = None
         self.scratch.chatting_end_step = None
-        return node
+        return created
 
     def maybe_reflect(self, *, step: int) -> list[MemoryNode]:
         out: list[MemoryNode] = []
         if self.scratch.importance_trigger_curr <= 0 and self.nodes:
-            focal_points = self._reflection_focal_points()
+            focal_points = self._reflection_focal_points(step=step)
             for focal in focal_points[:3]:
                 retrieved = self.retrieve_ranked(focal_text=focal, step=step, limit=5)
+                retrieved_nodes = [self.id_to_node[str(item["node_id"])] for item in retrieved if item.get("node_id") and str(item["node_id"]) in self.id_to_node]
+
+                # Try LLM insight generation
+                if self.cognition is not None and retrieved_nodes:
+                    try:
+                        statements = "\n".join(
+                            f"{i}. {node.description}" for i, node in enumerate(retrieved_nodes)
+                        )
+                        result = self.cognition.generate_reflection_insights({
+                            "agent_id": self.agent_id,
+                            "agent_name": self.agent_name,
+                            "town_id": self.town_id or "",
+                            "focal_point": focal,
+                            "retrieved_statements": statements,
+                            "step": step,
+                        })
+                        insights = result.get("insights") or []
+                        if insights and result.get("route") != "heuristic":
+                            for insight_data in insights[:3]:
+                                if not isinstance(insight_data, dict):
+                                    continue
+                                insight_text = str(insight_data.get("insight") or "").strip()
+                                if not insight_text:
+                                    continue
+                                evidence_indices = insight_data.get("evidence_indices") or [0]
+                                evidence_ids = tuple(
+                                    retrieved_nodes[idx].node_id
+                                    for idx in evidence_indices
+                                    if isinstance(idx, int) and 0 <= idx < len(retrieved_nodes)
+                                ) or tuple(str(item["node_id"]) for item in retrieved[:1] if item.get("node_id"))
+                                out.append(
+                                    self.add_node(
+                                        kind="reflection",
+                                        step=step,
+                                        subject=self.agent_name,
+                                        predicate="reflects_on",
+                                        object=focal,
+                                        description=insight_text,
+                                        poignancy=6,
+                                        evidence_ids=evidence_ids,
+                                        decrement_trigger=False,
+                                        expiration_step=int(step) + (24 * 7),
+                                    )
+                                )
+                            continue  # Skip deterministic fallback for this focal point
+                    except Exception:
+                        pass
+
+                # Deterministic fallback
                 evidence_ids = tuple(str(item["node_id"]) for item in retrieved[:3] if item.get("node_id"))
                 out.append(
                     self.add_node(
@@ -965,9 +1363,8 @@ class AgentMemory:
             self.scratch.importance_trigger_curr = int(self.scratch.importance_trigger_max)
             self.scratch.importance_ele_n = 0
 
-        follow_up = self._conversation_follow_up_thought(step=step)
-        if follow_up is not None:
-            out.append(follow_up)
+        follow_ups = self._conversation_follow_up_thought(step=step)
+        out.extend(follow_ups)
         return out
 
     def summary(self) -> dict[str, object]:

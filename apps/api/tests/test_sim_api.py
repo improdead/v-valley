@@ -882,7 +882,7 @@ class SimApiTests(unittest.TestCase):
         )
         self.assertEqual(memory_resp.status_code, 200)
         snapshot = memory_resp.json()["snapshot"]["agent"]["memory"]
-        wrap_nodes = [node for node in snapshot["nodes"] if node.get("predicate") == "conversation_wrap_up"]
+        wrap_nodes = [node for node in snapshot["nodes"] if node.get("predicate") in ("conversation_wrap_up", "memo_on_chat")]
         self.assertGreaterEqual(len(wrap_nodes), 1)
         buffer = snapshot["scratch"]["chatting_with_buffer"]
         self.assertIn(peer["name"], buffer)
