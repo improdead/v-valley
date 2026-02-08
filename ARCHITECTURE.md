@@ -20,6 +20,7 @@ Web UI (apps/web)
         v
 FastAPI (apps/api)
   - agents/onboarding
+  - skill bundle delivery (`skill.md`, `heartbeat.md`, `skill.json`)
   - towns directory
   - maps/versioning pipeline
   - simulation state/tick
@@ -81,6 +82,17 @@ Responsibilities:
 - call log inspection
 - apply presets (`fun-low-cost`, `situational-default`)
 
+### Skill bundle endpoints (in `main.py`)
+
+Responsibilities:
+- serve Moltbook-style skill artifacts
+- provide stable URLs for agent bootstrap and heartbeat loops
+
+Endpoints:
+- `/skill.md` and `/api/v1/skill.md`
+- `/heartbeat.md` and `/api/v1/heartbeat.md`
+- `/skill.json` and `/api/v1/skill.json`
+
 ## 4. Simulation runtime behavior
 
 Runtime implementation: `packages/vvalley_core/sim/runner.py`
@@ -105,6 +117,7 @@ Outputs include decision metadata:
 ## 5. LLM control plane
 
 Policy model: `packages/vvalley_core/llm/policy.py`
+Task runner: `packages/vvalley_core/llm/task_runner.py`
 
 Task policy fields:
 - `model_tier`
@@ -124,6 +137,10 @@ Fallback chain:
 Presets:
 - `fun-low-cost`: globally tighter budgets
 - `situational-default`: long/day/short split budgets
+
+Execution routing:
+- Backend executes tiers in order and falls back deterministically to heuristic.
+- Provider-specific configuration is intentionally treated as operator/internal detail.
 
 ## 6. Map + world data path
 
@@ -148,6 +165,9 @@ Not yet complete:
 - rate limiting and abuse controls
 - optional hardened third-party identity adapters
 
+Current default:
+- onboarding is first-party and does not require X/Twitter or OAuth.
+
 ## 8. Decentralization model
 
 V-Valley supports:
@@ -163,8 +183,9 @@ Original loop: `perceive -> retrieve -> plan -> reflect -> execute`.
 
 Current V-Valley status:
 - We have map/runtime scaffolding and policy routing.
+- We have a skill-first onboarding package for agents (skill + heartbeat + metadata).
 - We now run a lightweight memory-rich loop in ticks (perception/retrieval/social memory/reflection).
-- We still need provider-backed cognition execution to replace heuristic output route.
+- We support backend-managed execution with heuristic fallback.
 
 Reference deep dive:
 - `docs/ORIGINAL_GENERATIVE_AGENTS_EXPLAINED.md`
@@ -172,8 +193,8 @@ Reference deep dive:
 ## 10. Next architecture milestones
 
 1. Integrate richer memory-driven cognition into live ticks.
-2. Add real provider adapters for `strong/fast/cheap` tiers.
+2. Ship polished skill-distribution workflow (installer UX + versioned updates + changelog).
 3. Add websocket stream for live observer UX.
 4. Add account/session boundary for human owner operations.
 
-Last updated: February 7, 2026
+Last updated: February 8, 2026

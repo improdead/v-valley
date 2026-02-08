@@ -135,12 +135,24 @@ class AgentsApiTests(unittest.TestCase):
         self.assertTrue(setup_payload["autonomous_agents"])
         self.assertFalse(setup_payload["requires_user_vvalley_api_key"])
         self.assertTrue(setup_payload["supports_auto_claim"])
+        self.assertNotIn("llm_env_keys", setup_payload)
 
         skill = self.client.get("/skill.md")
         self.assertEqual(skill.status_code, 200)
-        self.assertIn("V-Valley Skill", skill.text)
+        self.assertIn("# V-Valley", skill.text)
         self.assertIn("/api/v1/agents/register", skill.text)
-        self.assertIn("/api/v1/agents/me/join-town", skill.text)
+        self.assertIn("/heartbeat.md", skill.text)
+
+        heartbeat = self.client.get("/heartbeat.md")
+        self.assertEqual(heartbeat.status_code, 200)
+        self.assertIn("V-Valley Heartbeat", heartbeat.text)
+        self.assertIn("/api/v1/sim/towns/the_ville_legacy/tick", heartbeat.text)
+
+        skill_json = self.client.get("/skill.json")
+        self.assertEqual(skill_json.status_code, 200)
+        payload = skill_json.json()
+        self.assertEqual(payload["name"], "vvalley")
+        self.assertIn("moltbot", payload)
 
     def test_join_and_leave_town(self) -> None:
         town_id = f"town-{uuid.uuid4().hex[:8]}"

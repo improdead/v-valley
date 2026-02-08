@@ -14,11 +14,18 @@ from .policy import (
     resolve_fallback_chain,
     trim_context_to_budget,
 )
+from .providers import (
+    ProviderExecutionError,
+    ProviderExecutionResult,
+    ProviderUnavailableError,
+    execute_tier_model,
+)
 
 
 PolicyLookup = Callable[[str], TaskPolicy]
 LogSink = Callable[[dict[str, Any]], None]
 HeuristicFn = Callable[[dict[str, Any]], dict[str, Any]]
+ProviderInvoker = Callable[..., ProviderExecutionResult]
 
 
 @dataclass(frozen=True)
@@ -50,9 +57,16 @@ class TaskExecutionResult:
 class PolicyTaskRunner:
     """Runs cognition tasks under explicit policy constraints."""
 
-    def __init__(self, *, policy_lookup: PolicyLookup | None = None, log_sink: LogSink | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        policy_lookup: PolicyLookup | None = None,
+        log_sink: LogSink | None = None,
+        provider_invoker: ProviderInvoker | None = None,
+    ) -> None:
         self._policy_lookup = policy_lookup or default_policy_for_task
         self._log_sink = log_sink
+        self._provider_invoker = provider_invoker or execute_tier_model
 
     def run(
         self,
@@ -72,19 +86,101 @@ class PolicyTaskRunner:
             context_text,
             policy.max_input_tokens,
         )
-        _ = bounded_context  # placeholder for future provider execution.
-
         fallback_chain = resolve_fallback_chain(policy.model_tier)
-        selected_tier = fallback_chain[-1]  # currently always final fallback: heuristic
+        for tier in fallback_chain:
+            if tier == "heuristic":
+                break
+            for _ in range(max(1, policy.retry_limit + 1)):
+                start = perf_counter()
+                try:
+                    provider_result = self._provider_invoker(
+                        tier=tier,
+                        task_name=task_name,
+                        bounded_context_text=bounded_context,
+                        temperature=policy.temperature,
+                        max_output_tokens=policy.max_output_tokens,
+                        timeout_ms=policy.timeout_ms,
+                    )
+                    latency_ms = int((perf_counter() - start) * 1000)
+                    completion_tokens = int(
+                        provider_result.completion_tokens
+                        if provider_result.completion_tokens is not None
+                        else max(1, len(json.dumps(provider_result.output, separators=(",", ":"))) // 4)
+                    )
+                    result = TaskExecutionResult(
+                        task_name=task_name,
+                        route="provider",
+                        used_tier=tier,
+                        output=dict(provider_result.output),
+                        prompt_tokens=int(provider_result.prompt_tokens or prompt_tokens),
+                        completion_tokens=completion_tokens,
+                        latency_ms=latency_ms,
+                        context_trimmed=trimmed,
+                        policy=policy.as_dict(),
+                    )
+                    self._emit_log(
+                        town_id=town_id,
+                        agent_id=agent_id,
+                        task_name=task_name,
+                        model_name=provider_result.model_name,
+                        prompt_tokens=result.prompt_tokens,
+                        completion_tokens=result.completion_tokens,
+                        latency_ms=latency_ms,
+                        success=True,
+                        error_code=None,
+                    )
+                    return result
+                except ProviderUnavailableError as exc:
+                    latency_ms = int((perf_counter() - start) * 1000)
+                    self._emit_log(
+                        town_id=town_id,
+                        agent_id=agent_id,
+                        task_name=task_name,
+                        model_name=exc.model_name or f"{tier}:provider",
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=0,
+                        latency_ms=latency_ms,
+                        success=False,
+                        error_code=exc.error_code,
+                    )
+                    break
+                except ProviderExecutionError as exc:
+                    latency_ms = int((perf_counter() - start) * 1000)
+                    self._emit_log(
+                        town_id=town_id,
+                        agent_id=agent_id,
+                        task_name=task_name,
+                        model_name=exc.model_name or f"{tier}:provider",
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=0,
+                        latency_ms=latency_ms,
+                        success=False,
+                        error_code=exc.error_code,
+                    )
+                    continue
+                except Exception as exc:
+                    latency_ms = int((perf_counter() - start) * 1000)
+                    self._emit_log(
+                        town_id=town_id,
+                        agent_id=agent_id,
+                        task_name=task_name,
+                        model_name=f"{tier}:provider",
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=0,
+                        latency_ms=latency_ms,
+                        success=False,
+                        error_code=f"provider_exception:{exc.__class__.__name__}",
+                    )
+                    continue
+
         start = perf_counter()
         output = heuristic_fn(context)
         latency_ms = int((perf_counter() - start) * 1000)
         completion_tokens = max(1, len(json.dumps(output, separators=(",", ":"))) // 4)
-
         result = TaskExecutionResult(
             task_name=task_name,
             route="heuristic",
-            used_tier=selected_tier,
+            used_tier="heuristic",
             output=output,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -96,7 +192,7 @@ class PolicyTaskRunner:
             town_id=town_id,
             agent_id=agent_id,
             task_name=task_name,
-            model_name=f"{selected_tier}:heuristic",
+            model_name="heuristic:local",
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,

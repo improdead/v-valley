@@ -23,8 +23,23 @@ from packages.vvalley_core.sim.runner import reset_simulation_states_for_tests
 
 
 class LlmApiTests(unittest.TestCase):
+    _provider_env_keys = (
+        "VVALLEY_LLM_MODEL",
+        "VVALLEY_LLM_STRONG_MODEL",
+        "VVALLEY_LLM_FAST_MODEL",
+        "VVALLEY_LLM_CHEAP_MODEL",
+        "VVALLEY_LLM_API_KEY",
+        "VVALLEY_LLM_STRONG_API_KEY",
+        "VVALLEY_LLM_FAST_API_KEY",
+        "VVALLEY_LLM_CHEAP_API_KEY",
+        "OPENAI_API_KEY",
+    )
+
     def setUp(self) -> None:
         os.environ["VVALLEY_DB_PATH"] = str(TEST_DB_PATH)
+        self._provider_env_backup = {k: os.environ.get(k) for k in self._provider_env_keys}
+        for key in self._provider_env_keys:
+            os.environ.pop(key, None)
         if TEST_DB_PATH.exists():
             TEST_DB_PATH.unlink()
         reset_agents_backend()
@@ -32,6 +47,13 @@ class LlmApiTests(unittest.TestCase):
         reset_llm_backend()
         reset_simulation_states_for_tests()
         self.client = TestClient(app)
+
+    def tearDown(self) -> None:
+        for key, value in self._provider_env_backup.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
     def test_default_policies_are_exposed(self) -> None:
         resp = self.client.get("/api/v1/llm/policies")
@@ -101,10 +123,11 @@ class LlmApiTests(unittest.TestCase):
         self.assertEqual(logs.status_code, 200)
         payload = logs.json()
         self.assertGreaterEqual(payload["count"], 1)
-        first = payload["logs"][0]
-        self.assertEqual(first["task_name"], "short_action")
-        self.assertTrue(first["model_name"].endswith(":heuristic"))
-        self.assertTrue(bool(first["success"]))
+        short_action_logs = [row for row in payload["logs"] if row["task_name"] == "short_action"]
+        self.assertGreaterEqual(len(short_action_logs), 1)
+        success_logs = [row for row in short_action_logs if bool(row["success"])]
+        self.assertGreaterEqual(len(success_logs), 1)
+        self.assertTrue(any("heuristic" in row["model_name"] for row in success_logs))
 
     def test_tick_scope_routes_to_daily_or_long_term_policy(self) -> None:
         town_id = f"town-{uuid.uuid4().hex[:8]}"

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -58,20 +57,10 @@ def _require_bearer_token(authorization: Optional[str]) -> str:
     return token
 
 
-def _truthy_env(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _setup_info_payload() -> dict[str, Any]:
-    requires_user_llm_api_key = _truthy_env("VVALLEY_REQUIRE_USER_LLM_API_KEY", False)
     return {
         "autonomous_agents": True,
         "requires_user_vvalley_api_key": False,
-        "requires_user_llm_api_key": requires_user_llm_api_key,
-        "llm_mode": "bring_your_own_key" if requires_user_llm_api_key else "platform_managed",
         "supports_auto_claim": True,
         "recommended_register_payload": {
             "name": "MyAgent",
@@ -82,6 +71,7 @@ def _setup_info_payload() -> dict[str, Any]:
             "V-Valley API keys are issued by /api/v1/agents/register.",
             "Users should not manually create a V-Valley API key.",
             "Agents should store their issued API key and use it autonomously.",
+            "No X/Twitter integration is required for core onboarding in this repo.",
             "Claimed agents can join a town via /api/v1/agents/me/join-town.",
         ],
     }
