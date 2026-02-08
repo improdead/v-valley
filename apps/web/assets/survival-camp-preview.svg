@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="520" viewBox="0 0 900 520">
+  <title>Survival camp preview</title>
+  <rect width="900" height="520" fill="#8ea3b0"/>
+  <rect y="280" width="900" height="240" fill="#4f6750"/>
+
+  <rect x="170" y="210" width="560" height="230" fill="#5a6e58"/>
+  <rect x="186" y="226" width="528" height="198" fill="#6f845f"/>
+
+  <g fill="#3f2f1f">
+    <rect x="170" y="210" width="560" height="12"/>
+    <rect x="170" y="428" width="560" height="12"/>
+    <rect x="170" y="210" width="12" height="230"/>
+    <rect x="718" y="210" width="12" height="230"/>
+  </g>
+
+  <g fill="#8b6a42">
+    <rect x="260" y="286" width="110" height="88"/>
+    <rect x="385" y="300" width="130" height="74"/>
+    <rect x="530" y="286" width="106" height="88"/>
+  </g>
+
+  <g fill="#533c25">
+    <rect x="280" y="332" width="30" height="42"/>
+    <rect x="435" y="334" width="30" height="40"/>
+    <rect x="568" y="332" width="30" height="42"/>
+  </g>
+
+  <rect x="420" y="246" width="50" height="36" fill="#c06a34"/>
+  <rect x="432" y="232" width="26" height="14" fill="#ffb15a"/>
+
+  <g fill="#4a3a26">
+    <rect x="220" y="190" width="10" height="48"/>
+    <rect x="280" y="190" width="10" height="48"/>
+    <rect x="340" y="190" width="10" height="48"/>
+    <rect x="400" y="190" width="10" height="48"/>
+    <rect x="460" y="190" width="10" height="48"/>
+    <rect x="520" y="190" width="10" height="48"/>
+    <rect x="580" y="190" width="10" height="48"/>
+    <rect x="640" y="190" width="10" height="48"/>
+  </g>
+
+  <g fill="#2d2417">
+    <rect x="694" y="172" width="22" height="54"/>
+    <rect x="688" y="160" width="34" height="12"/>
+    <rect x="684" y="226" width="42" height="10"/>
+  </g>
+</svg>

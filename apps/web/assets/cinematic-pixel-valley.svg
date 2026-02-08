@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="768" viewBox="0 0 1280 768">
+  <title>V-Valley cinematic pixel valley</title>
+  <desc>Original AI-generated pixel-style valley art for V-Valley homepage.</desc>
+
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7ec7ff"/>
+      <stop offset="58%" stop-color="#bceaff"/>
+      <stop offset="100%" stop-color="#f2f4bf"/>
+    </linearGradient>
+    <linearGradient id="sunGlow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffe58f" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#ffd05d" stop-opacity="0.55"/>
+    </linearGradient>
+    <linearGradient id="groundA" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7ec460"/>
+      <stop offset="100%" stop-color="#568f3f"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="768" fill="url(#sky)"/>
+  <rect x="940" y="45" width="230" height="230" rx="115" fill="url(#sunGlow)" opacity="0.75"/>
+
+  <g opacity="0.96">
+    <rect x="0" y="310" width="1280" height="190" fill="#8ab7cc"/>
+    <rect x="0" y="345" width="1280" height="155" fill="#789fb9"/>
+    <rect x="0" y="385" width="1280" height="115" fill="#6b92ad"/>
+  </g>
+
+  <g opacity="0.95">
+    <rect x="0" y="500" width="1280" height="268" fill="url(#groundA)"/>
+    <rect x="0" y="566" width="1280" height="202" fill="#609946"/>
+  </g>
+
+  <g fill="#4f8140">
+    <rect x="40" y="548" width="50" height="120"/>
+    <rect x="110" y="534" width="42" height="134"/>
+    <rect x="176" y="556" width="46" height="112"/>
+    <rect x="255" y="542" width="58" height="126"/>
+    <rect x="336" y="554" width="44" height="114"/>
+    <rect x="1050" y="552" width="48" height="116"/>
+    <rect x="1118" y="530" width="42" height="138"/>
+    <rect x="1182" y="546" width="52" height="122"/>
+  </g>
+
+  <g>
+    <rect x="500" y="522" width="285" height="175" fill="#9b6a3f"/>
+    <rect x="520" y="542" width="245" height="120" fill="#cf9b69"/>
+    <rect x="530" y="486" width="224" height="70" fill="#72472e"/>
+    <rect x="548" y="502" width="44" height="30" fill="#d1b06f"/>
+    <rect x="604" y="502" width="44" height="30" fill="#d1b06f"/>
+    <rect x="660" y="502" width="44" height="30" fill="#d1b06f"/>
+    <rect x="716" y="502" width="28" height="30" fill="#d1b06f"/>
+    <rect x="618" y="585" width="54" height="77" fill="#6f472f"/>
+    <rect x="548" y="565" width="42" height="35" fill="#7bc7e3"/>
+    <rect x="698" y="565" width="42" height="35" fill="#7bc7e3"/>
+    <rect x="486" y="514" width="12" height="183" fill="#4a2d1d"/>
+    <rect x="785" y="514" width="12" height="183" fill="#4a2d1d"/>
+  </g>
+
+  <g>
+    <rect x="400" y="648" width="480" height="20" fill="#c7b46b"/>
+    <rect x="380" y="666" width="520" height="16" fill="#b19953"/>
+    <rect x="355" y="682" width="570" height="14" fill="#917c44"/>
+    <rect x="370" y="650" width="20" height="16" fill="#8a743f"/>
+    <rect x="410" y="650" width="20" height="16" fill="#8a743f"/>
+    <rect x="450" y="650" width="20" height="16" fill="#8a743f"/>
+    <rect x="490" y="650" width="20" height="16" fill="#8a743f"/>
+    <rect x="530" y="650" width="20" height="16" fill="#8a743f"/>
+    <rect x="570" y="650" width="20" height="16" fill="#8a743f"/>
+    <rect x="610" y="650" width="20" height="16" fill="#8a743f"/>
+    <rect x="650" y="650" width="20" height="16" fill="#8a743f"/>
+    <rect x="690" y="650" width="20" height="16" fill="#8a743f"/>
+    <rect x="730" y="650" width="20" height="16" fill="#8a743f"/>
+    <rect x="770" y="650" width="20" height="16" fill="#8a743f"/>
+    <rect x="810" y="650" width="20" height="16" fill="#8a743f"/>
+  </g>
+
+  <g>
+    <rect x="264" y="610" width="24" height="48" fill="#51412b"/>
+    <rect x="250" y="584" width="54" height="34" fill="#74b85b"/>
+    <rect x="284" y="592" width="28" height="22" fill="#5ea545"/>
+    <rect x="984" y="610" width="24" height="48" fill="#51412b"/>
+    <rect x="969" y="582" width="56" height="36" fill="#74b85b"/>
+    <rect x="998" y="590" width="30" height="22" fill="#5ea545"/>
+  </g>
+
+</svg>

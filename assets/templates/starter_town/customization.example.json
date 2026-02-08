@@ -1,0 +1,27 @@
+{
+  "map_properties": {
+    "town_theme": "coastal",
+    "language": "en"
+  },
+  "locations": [
+    {
+      "name": "cafe",
+      "affordances": ["food", "social"],
+      "hours": "06:30-22:00",
+      "zone_rules": ["quiet_zone"]
+    },
+    {
+      "name": "park",
+      "affordances": ["leisure", "social"],
+      "hours": "06:00-23:00",
+      "zone_rules": ["no_chat_zone"]
+    }
+  ],
+  "spawns": [
+    {
+      "name": "spawn_a",
+      "x": 6,
+      "y": 11
+    }
+  ]
+}
