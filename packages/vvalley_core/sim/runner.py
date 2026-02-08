@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -46,6 +47,9 @@ class NpcState:
     status: str = "idle"
     last_step: int = 0
     current_location: str | None = None
+    goal_x: int | None = None
+    goal_y: int | None = None
+    goal_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -59,6 +63,11 @@ class NpcState:
             "status": self.status,
             "last_step": self.last_step,
             "current_location": self.current_location,
+            "goal": {
+                "x": self.goal_x,
+                "y": self.goal_y,
+                "reason": self.goal_reason,
+            },
             "memory_summary": self.memory.summary(),
         }
 
@@ -171,20 +180,168 @@ class SimulationRunner:
             return x, y
         return nx, ny
 
+    def _neighbors4(self, *, town: TownRuntime, x: int, y: int) -> list[tuple[int, int]]:
+        out: list[tuple[int, int]] = []
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = x + dx, y + dy
+            if nx < 0 or ny < 0 or nx >= town.width or ny >= town.height:
+                continue
+            if not town.walkable[ny][nx]:
+                continue
+            out.append((nx, ny))
+        return out
+
+    def _next_step_towards(
+        self,
+        *,
+        town: TownRuntime,
+        start: tuple[int, int],
+        target: tuple[int, int],
+    ) -> tuple[int, int]:
+        if start == target:
+            return start
+        tx, ty = target
+        if tx < 0 or ty < 0 or tx >= town.width or ty >= town.height:
+            return start
+        if not town.walkable[ty][tx]:
+            return start
+
+        queue: deque[tuple[int, int]] = deque([start])
+        came_from: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
+
+        while queue:
+            curr = queue.popleft()
+            if curr == target:
+                break
+            for nxt in self._neighbors4(town=town, x=curr[0], y=curr[1]):
+                if nxt in came_from:
+                    continue
+                came_from[nxt] = curr
+                queue.append(nxt)
+
+        if target not in came_from:
+            return start
+
+        path: list[tuple[int, int]] = []
+        cursor: tuple[int, int] | None = target
+        while cursor is not None and cursor != start:
+            path.append(cursor)
+            cursor = came_from.get(cursor)
+        path.reverse()
+        if not path:
+            return start
+        return path[0]
+
+    @staticmethod
+    def _normalize_scope(scope: str) -> str:
+        value = str(scope or "").strip().lower()
+        if value in {"long_term_plan", "long_term", "long"}:
+            return "long_term_plan"
+        if value in {"daily_plan", "daily"}:
+            return "daily_plan"
+        return "short_action"
+
+    def _locations_by_affordance(self, *, town: TownRuntime, affordance: str | None) -> list[MapLocationPoint]:
+        normalized = str(affordance or "").strip().lower()
+        if not normalized:
+            return list(town.location_points)
+        matched = [loc for loc in town.location_points if normalized in {a.lower() for a in loc.affordances}]
+        if matched:
+            return matched
+        return list(town.location_points)
+
+    def _choose_location_goal(
+        self,
+        *,
+        town: TownRuntime,
+        npc: NpcState,
+        scope: str,
+    ) -> tuple[int, int, str, str | None] | None:
+        if not town.location_points:
+            return None
+
+        normalized_scope = self._normalize_scope(scope)
+        schedule_item = npc.memory.scratch.current_schedule_item(step=town.step, step_minutes=10)
+
+        target_affordance: str | None = None
+        if normalized_scope == "daily_plan" and schedule_item:
+            target_affordance = schedule_item.affordance_hint
+        elif normalized_scope == "long_term_plan":
+            target_affordance = "social"
+        elif schedule_item:
+            target_affordance = schedule_item.affordance_hint
+
+        candidates = self._locations_by_affordance(town=town, affordance=target_affordance)
+        if not candidates:
+            return None
+
+        def score(loc: MapLocationPoint) -> tuple[int, int, int]:
+            label = loc.label()
+            visits = int(npc.memory.known_places.get(label, 0))
+            dist = self._manhattan(npc.x, npc.y, loc.x, loc.y)
+            tie = self._hash_int(f"{npc.agent_id}:{loc.name}:{town.step}") % 1000
+            if normalized_scope == "long_term_plan":
+                return (visits, -dist, tie)
+            return (visits, dist, tie)
+
+        chosen = sorted(candidates, key=score)[0]
+        reason = schedule_item.description if schedule_item else normalized_scope
+        return (chosen.x, chosen.y, str(reason), target_affordance)
+
+    def _goal_from_relationship(
+        self,
+        *,
+        town: TownRuntime,
+        npc: NpcState,
+    ) -> tuple[int, int, str] | None:
+        top = npc.memory.top_relationships(limit=1)
+        if not top:
+            return None
+        target_id = str(top[0]["agent_id"])
+        other = town.npcs.get(target_id)
+        if not other:
+            return None
+        return (other.x, other.y, f"move_toward_{other.name}")
+
     @staticmethod
     def _adjacent(a: NpcState, b: NpcState) -> bool:
         return abs(a.x - b.x) + abs(a.y - b.y) <= 1
 
     def _social_message(self, *, a: NpcState, b: NpcState, step: int) -> str:
+        a_focus = a.memory.scratch.act_description or "their routine"
+        b_focus = b.memory.scratch.act_description or "their routine"
         templates = (
-            "{a} shares a town rumor with {b}.",
-            "{a} and {b} trade quick survival tips.",
-            "{a} asks {b} about their day plan.",
-            "{a} and {b} sync on where to gather later.",
-            "{a} gives {b} a friendly wave and joke.",
+            "{a} shares a town rumor with {b} while discussing {a_focus}.",
+            "{a} and {b} trade quick survival tips about {b_focus}.",
+            "{a} asks {b} about their day plan and {b_focus}.",
+            "{a} and {b} sync on where to gather later after {a_focus}.",
+            "{a} gives {b} a friendly wave and joke while heading to {b_focus}.",
         )
         idx = self._hash_int(f"social:{a.agent_id}:{b.agent_id}:{step}") % len(templates)
-        return templates[idx].format(a=a.name, b=b.name)
+        return templates[idx].format(a=a.name, b=b.name, a_focus=a_focus, b_focus=b_focus)
+
+    def _social_transcript(self, *, a: NpcState, b: NpcState, step: int) -> list[list[str]]:
+        a_focus = a.memory.scratch.act_description or "today"
+        b_focus = b.memory.scratch.act_description or "today"
+        variants = (
+            [
+                [a.name, f"{b.name}, what are you focused on after {a_focus}?"],
+                [b.name, f"I am on {b_focus}, then heading to a social spot."],
+                [a.name, "Sounds good, let's sync again later."],
+            ],
+            [
+                [a.name, f"Need help with {a_focus}?"],
+                [b.name, f"Maybe after I finish {b_focus}."],
+                [a.name, "Ping me if plans change."],
+            ],
+            [
+                [a.name, "Town feels busy today."],
+                [b.name, f"Yeah, I still need to finish {b_focus}."],
+                [a.name, "Good luck, see you around."],
+            ],
+        )
+        idx = self._hash_int(f"social_chat:{a.agent_id}:{b.agent_id}:{step}") % len(variants)
+        return variants[idx]
 
     def _build_social_events(self, *, town: TownRuntime, step: int) -> list[dict[str, Any]]:
         npcs = sorted(town.npcs.values(), key=lambda n: n.agent_id)
@@ -204,6 +361,7 @@ class SimulationRunner:
                             {"agent_id": b.agent_id, "name": b.name, "x": b.x, "y": b.y},
                         ],
                         "message": self._social_message(a=a, b=b, step=step),
+                        "transcript": self._social_transcript(a=a, b=b, step=step),
                     }
                 )
                 if len(out) >= self.max_social_events_per_step:
@@ -265,6 +423,7 @@ class SimulationRunner:
         return best_label
 
     def _update_location_memory(self, *, town: TownRuntime, npc: NpcState, step: int) -> None:
+        npc.memory.set_position(x=npc.x, y=npc.y, step=step)
         label = self._closest_location_label(town=town, x=npc.x, y=npc.y)
         if not label:
             return
@@ -345,17 +504,25 @@ class SimulationRunner:
             if not a or not b:
                 continue
             message = str(event.get("message") or "")
+            transcript_raw = event.get("transcript") or []
+            transcript: list[tuple[str, str]] = []
+            for row in transcript_raw:
+                if not isinstance(row, (list, tuple)) or len(row) != 2:
+                    continue
+                transcript.append((str(row[0]), str(row[1])))
             a.memory.add_social_interaction(
                 step=step,
                 target_agent_id=b.agent_id,
                 target_name=b.name,
                 message=message,
+                transcript=transcript,
             )
             b.memory.add_social_interaction(
                 step=step,
                 target_agent_id=a.agent_id,
                 target_name=a.name,
                 message=message,
+                transcript=transcript,
             )
 
     def _run_reflection_cycle(self, *, town: TownRuntime, step: int) -> list[dict[str, Any]]:
@@ -418,6 +585,7 @@ class SimulationRunner:
                         step=runtime.step,
                     ),
                 )
+                runtime.npcs[agent_id].memory.set_position(x=spawn_x, y=spawn_y, step=runtime.step)
                 continue
 
             npc.name = str(member.get("name") or npc.name)
@@ -425,6 +593,7 @@ class SimulationRunner:
             npc.claim_status = str(member.get("claim_status") or npc.claim_status)
             npc.joined_at = member.get("joined_at")
             npc.memory.agent_name = npc.name
+            npc.memory.set_position(x=npc.x, y=npc.y, step=runtime.step)
 
         runtime.updated_at = _utc_now()
         return runtime
@@ -504,6 +673,7 @@ class SimulationRunner:
             for agent_id in sorted(runtime.npcs.keys()):
                 npc = runtime.npcs[agent_id]
                 self._update_location_memory(town=runtime, npc=npc, step=runtime.step)
+                npc.memory.maybe_refresh_plans(step=runtime.step, scope=planning_scope)
                 perception = self._perceive_nearby_agents(town=runtime, npc=npc, step=runtime.step)
                 focal_parts: list[str] = [planning_scope]
                 if npc.current_location:
@@ -518,8 +688,28 @@ class SimulationRunner:
 
                 from_x, from_y = npc.x, npc.y
                 planner_meta: dict[str, Any]
-                dx: int
-                dy: int
+                dx = 0
+                dy = 0
+                goal_x: int | None = None
+                goal_y: int | None = None
+                goal_reason: str | None = None
+                goal_affordance: str | None = None
+
+                normalized_scope = self._normalize_scope(planning_scope)
+                if normalized_scope == "long_term_plan":
+                    rel_goal = self._goal_from_relationship(town=runtime, npc=npc)
+                    if rel_goal is not None:
+                        goal_x, goal_y, goal_reason = rel_goal
+
+                if goal_x is None or goal_y is None:
+                    location_goal = self._choose_location_goal(
+                        town=runtime,
+                        npc=npc,
+                        scope=normalized_scope,
+                    )
+                    if location_goal is not None:
+                        goal_x, goal_y, goal_reason, goal_affordance = location_goal
+
                 if planner:
                     context = {
                         "town_id": town_id,
@@ -529,6 +719,12 @@ class SimulationRunner:
                         "planning_scope": planning_scope,
                         "position": {"x": from_x, "y": from_y},
                         "map": {"width": runtime.width, "height": runtime.height},
+                        "goal_hint": {
+                            "x": goal_x,
+                            "y": goal_y,
+                            "reason": goal_reason,
+                            "affordance": goal_affordance,
+                        },
                         "perception": perception,
                         "memory": {
                             "summary": npc.memory.summary(),
@@ -539,6 +735,16 @@ class SimulationRunner:
                         decision = planner(context) or {}
                         dx = self._clamp_delta(decision.get("dx", 0))
                         dy = self._clamp_delta(decision.get("dy", 0))
+                        if decision.get("target_x") is not None and decision.get("target_y") is not None:
+                            try:
+                                goal_x = int(decision.get("target_x"))
+                                goal_y = int(decision.get("target_y"))
+                            except Exception:
+                                pass
+                        if decision.get("goal_reason"):
+                            goal_reason = str(decision.get("goal_reason"))
+                        if decision.get("affordance"):
+                            goal_affordance = str(decision.get("affordance"))
                         planner_meta = {
                             "route": decision.get("route", "planner"),
                             "used_tier": decision.get("used_tier"),
@@ -547,6 +753,12 @@ class SimulationRunner:
                             "policy_task": decision.get("policy_task"),
                             "retrieved_count": len(retrieved),
                             "perceived_new_events": len(perception["new_event_descriptions"]),
+                            "goal": {
+                                "x": goal_x,
+                                "y": goal_y,
+                                "reason": goal_reason,
+                                "affordance": goal_affordance,
+                            },
                         }
                     except Exception as exc:
                         dx, dy = 0, 0
@@ -558,6 +770,12 @@ class SimulationRunner:
                             "policy_task": "plan_move",
                             "retrieved_count": len(retrieved),
                             "perceived_new_events": len(perception["new_event_descriptions"]),
+                            "goal": {
+                                "x": goal_x,
+                                "y": goal_y,
+                                "reason": goal_reason,
+                                "affordance": goal_affordance,
+                            },
                         }
                 else:
                     dx, dy = self._step_direction(agent_id=agent_id, step=runtime.step)
@@ -569,20 +787,71 @@ class SimulationRunner:
                         "policy_task": "plan_move",
                         "retrieved_count": len(retrieved),
                         "perceived_new_events": len(perception["new_event_descriptions"]),
+                        "goal": {
+                            "x": goal_x,
+                            "y": goal_y,
+                            "reason": goal_reason,
+                            "affordance": goal_affordance,
+                        },
                     }
 
-                to_x, to_y = self._attempt_move(
-                    town=runtime,
-                    x=from_x,
-                    y=from_y,
-                    dx=dx,
-                    dy=dy,
-                )
+                if goal_x is not None and goal_y is not None:
+                    next_x, next_y = self._next_step_towards(
+                        town=runtime,
+                        start=(from_x, from_y),
+                        target=(goal_x, goal_y),
+                    )
+                    to_x, to_y = next_x, next_y
+                    planner_meta["movement_mode"] = "path_to_goal"
+                else:
+                    to_x, to_y = self._attempt_move(
+                        town=runtime,
+                        x=from_x,
+                        y=from_y,
+                        dx=dx,
+                        dy=dy,
+                    )
+                    if to_x == from_x and to_y == from_y and (dx != 0 or dy != 0):
+                        fallback_dx, fallback_dy = self._step_direction(agent_id=agent_id, step=runtime.step)
+                        to_x, to_y = self._attempt_move(
+                            town=runtime,
+                            x=from_x,
+                            y=from_y,
+                            dx=fallback_dx,
+                            dy=fallback_dy,
+                        )
+                        planner_meta["movement_mode"] = "planner_delta_with_fallback"
+                    else:
+                        planner_meta["movement_mode"] = "planner_delta"
+
                 npc.x = to_x
                 npc.y = to_y
+                npc.goal_x = goal_x
+                npc.goal_y = goal_y
+                npc.goal_reason = goal_reason
                 npc.last_step = runtime.step
                 npc.status = "moving" if (from_x != to_x or from_y != to_y) else "idle"
                 self._update_location_memory(town=runtime, npc=npc, step=runtime.step)
+
+                schedule_item = npc.memory.scratch.current_schedule_item(step=runtime.step, step_minutes=10)
+                if schedule_item is not None:
+                    action_description = npc.memory.planned_action_description(
+                        step=runtime.step,
+                        scope=planning_scope,
+                        fallback=goal_reason,
+                    )
+                elif goal_reason:
+                    action_description = str(goal_reason)
+                else:
+                    action_description = "roaming"
+                action_address = npc.current_location
+                npc.memory.set_action(
+                    step=runtime.step,
+                    description=action_description,
+                    address=action_address,
+                    duration=10,
+                    planned_path=[(goal_x, goal_y)] if goal_x is not None and goal_y is not None else [],
+                )
 
                 if from_x != to_x or from_y != to_y:
                     npc.memory.add_node(
@@ -607,6 +876,7 @@ class SimulationRunner:
                         "action": npc.status,
                         "decision": planner_meta,
                         "location": npc.current_location,
+                        "goal": {"x": npc.goal_x, "y": npc.goal_y, "reason": npc.goal_reason},
                     }
                 )
 
