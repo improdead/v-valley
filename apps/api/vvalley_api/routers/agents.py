@@ -18,7 +18,7 @@ from ..storage.agents import (
     register_agent,
     rotate_api_key,
 )
-from ..storage.map_versions import list_versions
+from ..storage.map_versions import list_versions, list_town_ids
 from ..storage.runtime_control import (
     get_agent_autonomy,
     upsert_agent_autonomy,
@@ -274,14 +274,14 @@ def rotate_agent_key(authorization: Optional[str] = Header(default=None)) -> dic
 def join_town(req: JoinTownRequest, authorization: Optional[str] = Header(default=None)) -> dict[str, Any]:
     api_key = _require_bearer_token(authorization)
     logger.info("[AGENTS] Join town request: town_id='%s'", req.town_id)
-    
+
     agent = get_agent_by_api_key(api_key)
     if not agent:
         logger.warning("[AGENTS] Join town failed - invalid API key")
         raise HTTPException(status_code=401, detail="Invalid API key")
-    
+
     logger.debug("[AGENTS] Agent joining town: agent_id=%s, name='%s'", agent["id"], agent["name"])
-    
+
     if not bool(agent.get("claimed", False)):
         logger.warning("[AGENTS] Join town failed - agent not claimed: agent_id=%s", agent["id"])
         raise HTTPException(status_code=403, detail="Agent must be claimed before joining a town")
@@ -299,7 +299,7 @@ def join_town(req: JoinTownRequest, authorization: Optional[str] = Header(defaul
     if not current_town or current_town.get("town_id") != town_id:
         current_count = count_active_agents_in_town(town_id)
         if current_count >= MAX_AGENTS_PER_TOWN:
-            logger.warning("[AGENTS] Join town failed - town full: town_id='%s', current=%d, max=%d", 
+            logger.warning("[AGENTS] Join town failed - town full: town_id='%s', current=%d, max=%d",
                           town_id, current_count, MAX_AGENTS_PER_TOWN)
             raise HTTPException(
                 status_code=409,
@@ -308,13 +308,13 @@ def join_town(req: JoinTownRequest, authorization: Optional[str] = Header(defaul
 
     membership = join_agent_town(agent_id=agent["id"], town_id=town_id)
     if not membership:
-        logger.error("[AGENTS] Join town failed - membership creation failed: agent_id=%s, town_id='%s'", 
+        logger.error("[AGENTS] Join town failed - membership creation failed: agent_id=%s, town_id='%s'",
                     agent["id"], town_id)
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    logger.info("[AGENTS] Agent joined town successfully: agent_id=%s, agent_name='%s', town_id='%s'", 
+    logger.info("[AGENTS] Agent joined town successfully: agent_id=%s, agent_name='%s', town_id='%s'",
                 agent["id"], agent["name"], town_id)
-    
+
     return {
         "ok": True,
         "membership": membership,
@@ -323,6 +323,67 @@ def join_town(req: JoinTownRequest, authorization: Optional[str] = Header(defaul
             "name": agent["name"],
             "status": agent["claim_status"],
             "claimed": bool(agent.get("claimed", False)),
+            "current_town": membership,
+        },
+    }
+
+
+@router.post("/me/auto-join")
+def auto_join_town(authorization: Optional[str] = Header(default=None)) -> dict[str, Any]:
+    """Join the best available town automatically (least populated with capacity)."""
+    api_key = _require_bearer_token(authorization)
+    logger.info("[AGENTS] Auto-join request")
+
+    agent = get_agent_by_api_key(api_key)
+    if not agent:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    if not bool(agent.get("claimed", False)):
+        raise HTTPException(status_code=403, detail="Agent must be claimed before joining a town")
+
+    current = get_agent_town(agent_id=agent["id"])
+    if current:
+        return {
+            "ok": True,
+            "already_joined": True,
+            "membership": current,
+            "agent": {
+                "id": agent["id"],
+                "name": agent["name"],
+                "status": agent["claim_status"],
+                "claimed": True,
+                "current_town": current,
+            },
+        }
+
+    town_ids = list_town_ids()
+    if not town_ids:
+        raise HTTPException(status_code=404, detail="No towns available. An operator must create a town first.")
+
+    best_town = None
+    best_pop = MAX_AGENTS_PER_TOWN + 1
+    for tid in town_ids:
+        pop = count_active_agents_in_town(tid)
+        if pop < MAX_AGENTS_PER_TOWN and pop < best_pop:
+            best_town = tid
+            best_pop = pop
+
+    if not best_town:
+        raise HTTPException(status_code=409, detail="All towns are full")
+
+    membership = join_agent_town(agent_id=agent["id"], town_id=best_town)
+    if not membership:
+        raise HTTPException(status_code=500, detail="Failed to join town")
+
+    logger.info("[AGENTS] Auto-joined: agent_id=%s, town_id='%s' (pop=%d)", agent["id"], best_town, best_pop)
+    return {
+        "ok": True,
+        "membership": membership,
+        "agent": {
+            "id": agent["id"],
+            "name": agent["name"],
+            "status": agent["claim_status"],
+            "claimed": True,
             "current_town": membership,
         },
     }

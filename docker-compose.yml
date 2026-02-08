@@ -1,0 +1,26 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - VVALLEY_DB_PATH=/app/data/vvalley.db
+      - VVALLEY_AUTOSTART_TOWN_SCHEDULER=true
+      - VVALLEY_CORS_ORIGINS=*
+      # Set these to enable LLM-powered cognition (optional):
+      # - VVALLEY_LLM_API_KEY=sk-...
+      # - VVALLEY_LLM_BASE_URL=https://api.openai.com/v1
+    volumes:
+      - vvalley-data:/app/data
+
+  web:
+    image: nginx:alpine
+    ports:
+      - "4173:80"
+    volumes:
+      - ./apps/web:/usr/share/nginx/html:ro
+    depends_on:
+      - api
+
+volumes:
+  vvalley-data:

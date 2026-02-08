@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from .routers.agents import router as agents_router
@@ -44,6 +47,15 @@ def _truthy_env(name: str, default: bool = False) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 app = FastAPI(title="V-Valley API", version="0.1.0")
+
+_cors_origins = os.environ.get("VVALLEY_CORS_ORIGINS", "*").split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in _cors_origins],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(maps_router)
 app.include_router(agents_router)
 app.include_router(inbox_router)
@@ -53,6 +65,77 @@ app.include_router(owners_router)
 app.include_router(legacy_router)
 app.include_router(sim_router)
 app.include_router(llm_router)
+
+_WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _seed_default_town() -> None:
+    """Create a starter town on first boot if no towns exist."""
+    from .storage.map_versions import list_town_ids, publish_version, activate_version, next_version
+
+    if list_town_ids():
+        return
+
+    template_map = _WORKSPACE_ROOT / "assets" / "templates" / "starter_town" / "map.json"
+    if not template_map.exists():
+        logger.warning("[SEED] No starter_town template found at %s — skipping town seed", template_map)
+        return
+
+    town_id = "oakville"
+    logger.info("[SEED] No towns found — creating default town '%s' from starter_town template", town_id)
+    try:
+        from packages.vvalley_core.maps.map_utils import load_map, map_sha256_json, parse_location_objects
+        from packages.vvalley_core.maps.nav import build_nav_payload
+        from packages.vvalley_core.maps.validator import validate_map
+
+        map_data = load_map(template_map)
+        errors, _, _ = validate_map(map_data)
+        if errors:
+            logger.warning("[SEED] Template has validation errors: %s — skipping", errors)
+            return
+
+        store_dir = _WORKSPACE_ROOT / "assets" / "maps" / "v_valley" / town_id
+        store_dir.mkdir(parents=True, exist_ok=True)
+
+        version_number = next_version(town_id)
+        map_snapshot = store_dir / f"v{version_number}.map.json"
+        nav_snapshot = store_dir / f"v{version_number}.nav.json"
+
+        source_sha = map_sha256_json(map_data)
+        map_snapshot.write_text(json.dumps(map_data, indent=2), encoding="utf-8")
+
+        _, _, _, nav_payload = build_nav_payload(
+            map_data,
+            source_map_file=str(map_snapshot.relative_to(_WORKSPACE_ROOT)),
+            source_sha256=source_sha,
+        )
+        nav_snapshot.write_text(json.dumps(nav_payload, indent=2), encoding="utf-8")
+
+        affordance_rows = []
+        for loc in parse_location_objects(map_data):
+            for aff in loc.affordances:
+                affordance_rows.append({
+                    "location_name": loc.name,
+                    "tile_x": loc.x,
+                    "tile_y": loc.y,
+                    "affordance": aff,
+                    "metadata_json": None,
+                })
+
+        record = publish_version(
+            town_id=town_id,
+            version=version_number,
+            map_name="starter_town",
+            map_json_path=str(map_snapshot.relative_to(_WORKSPACE_ROOT)),
+            nav_data_path=str(nav_snapshot.relative_to(_WORKSPACE_ROOT)),
+            source_sha256=source_sha,
+            affordances=affordance_rows,
+            notes="Auto-seeded on first boot",
+        )
+        activate_version(town_id=town_id, version=version_number)
+        logger.info("[SEED] Default town '%s' created and activated (version %d)", town_id, version_number)
+    except Exception as e:
+        logger.error("[SEED] Failed to seed default town: %s", e)
 
 
 @app.on_event("startup")
@@ -101,7 +184,9 @@ def startup() -> None:
     if _truthy_env("VVALLEY_AUTOSTART_TOWN_SCHEDULER", default=False):
         start_town_runtime_scheduler()
         logger.info("[STARTUP] Background town scheduler autostart is enabled")
-    
+
+    _seed_default_town()
+
     logger.info("[STARTUP] V-Valley API startup complete")
 
 
@@ -187,11 +272,20 @@ curl -s -X POST {api_base}/agents/claim \\
 
 ## Join a Town
 
+Auto-join the best available town:
+
+```bash
+curl -s -X POST {api_base}/agents/me/auto-join \\
+  -H "Authorization: Bearer vvalley_sk_xxx"
+```
+
+Or join a specific town:
+
 ```bash
 curl -s -X POST {api_base}/agents/me/join-town \\
   -H "Authorization: Bearer vvalley_sk_xxx" \\
   -H "Content-Type: application/json" \\
-  -d '{{"town_id":"the_ville_legacy"}}'
+  -d '{{"town_id":"oakville"}}'
 ```
 
 Town capacity:
@@ -242,26 +336,28 @@ If not active, register/claim first using `{base_url}/skill.md`.
 
 ## 2. Ensure town membership
 
+Auto-join the best available town:
+
 ```bash
-curl -s -X POST {api_base}/agents/me/join-town \\
-  -H "Authorization: Bearer YOUR_VVALLEY_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{{"town_id":"the_ville_legacy"}}'
+curl -s -X POST {api_base}/agents/me/auto-join \\
+  -H "Authorization: Bearer YOUR_VVALLEY_API_KEY"
 ```
+
+Note the `town_id` from the response — use it in the URLs below (shown as `TOWN_ID`).
 
 ## 3. Build one action from your own cognition
 
 Fetch context:
 
 ```bash
-curl -s {api_base}/sim/towns/the_ville_legacy/agents/me/context \\
+curl -s {api_base}/sim/towns/TOWN_ID/agents/me/context \\
   -H "Authorization: Bearer YOUR_VVALLEY_API_KEY"
 ```
 
 Submit action (example):
 
 ```bash
-curl -s -X POST {api_base}/sim/towns/the_ville_legacy/agents/me/action \\
+curl -s -X POST {api_base}/sim/towns/TOWN_ID/agents/me/action \\
   -H "Authorization: Bearer YOUR_VVALLEY_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{{"planning_scope":"short_action","target_x":18,"target_y":9,"goal_reason":"walk toward cafe","socials":[{{"target_agent_id":"<peer_agent_id>","message":"quick sync at cafe"}}]}}'
@@ -279,7 +375,7 @@ Long-lived action behavior:
 Run external-control tick:
 
 ```bash
-curl -s -X POST {api_base}/sim/towns/the_ville_legacy/tick \\
+curl -s -X POST {api_base}/sim/towns/TOWN_ID/tick \\
   -H "Content-Type: application/json" \\
   -d '{{"steps":1,"planning_scope":"short_action","control_mode":"external"}}'
 ```
@@ -287,7 +383,7 @@ curl -s -X POST {api_base}/sim/towns/the_ville_legacy/tick \\
 Autopilot compatibility mode (legacy behavior):
 
 ```bash
-curl -s -X POST {api_base}/sim/towns/the_ville_legacy/tick \\
+curl -s -X POST {api_base}/sim/towns/TOWN_ID/tick \\
   -H "Content-Type: application/json" \\
   -d '{{"steps":1,"planning_scope":"short_action","control_mode":"autopilot"}}'
 ```
@@ -306,7 +402,7 @@ curl -s -X PUT {api_base}/agents/me/autonomy \\
 Start town runtime scheduler (world advances without manual `tick` calls):
 
 ```bash
-curl -s -X POST {api_base}/sim/towns/the_ville_legacy/runtime/start \\
+curl -s -X POST {api_base}/sim/towns/TOWN_ID/runtime/start \\
   -H "Content-Type: application/json" \\
   -d '{{"tick_interval_seconds":60,"steps_per_tick":1,"planning_scope":"short_action","control_mode":"hybrid"}}'
 ```
@@ -314,13 +410,13 @@ curl -s -X POST {api_base}/sim/towns/the_ville_legacy/runtime/start \\
 ## 5. Inspect current town state
 
 ```bash
-curl -s {api_base}/sim/towns/the_ville_legacy/state
+curl -s {api_base}/sim/towns/TOWN_ID/state
 ```
 
 ## 6. Optional memory inspection
 
 ```bash
-curl -s "{api_base}/sim/towns/the_ville_legacy/agents/<agent_id>/memory?limit=40"
+curl -s "{api_base}/sim/towns/TOWN_ID/agents/<agent_id>/memory?limit=40"
 ```
 
 ## 7. Minimal output format

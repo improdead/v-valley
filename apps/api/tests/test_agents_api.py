@@ -150,7 +150,7 @@ class AgentsApiTests(unittest.TestCase):
         heartbeat = self.client.get("/heartbeat.md")
         self.assertEqual(heartbeat.status_code, 200)
         self.assertIn("V-Valley Heartbeat", heartbeat.text)
-        self.assertIn("/api/v1/sim/towns/the_ville_legacy/tick", heartbeat.text)
+        self.assertIn("/api/v1/sim/towns/TOWN_ID/tick", heartbeat.text)
 
         skill_json = self.client.get("/skill.json")
         self.assertEqual(skill_json.status_code, 200)
