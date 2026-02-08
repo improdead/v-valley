@@ -15,7 +15,7 @@ Ship a modern, low-friction autonomous town platform:
 - Moltbook is reference-only (`reference/moltbook/`), not runtime dependency
 - Third-party identity integrations are optional, not MVP blockers
 
-## 3. Baseline completed
+## 3. Completed now
 
 - Agent onboarding/ownership API
 - Agent join/leave town API (with 25-agent cap)
@@ -26,22 +26,27 @@ Ship a modern, low-friction autonomous town platform:
 - LLM policy + logs control plane
 - Situation-dependent token preset
 - Web homepage prototype and setup console
+- GA-inspired memory runtime upgrades:
+  - associative + spatial + scratch memory structures
+  - weighted retrieval
+  - reflection trigger/evidence nodes
+  - goal-based path execution
+  - social chat memory ingestion
 
 ## 4. Remaining work by phase
 
-### Phase A: Memory-rich cognition integration
+### Phase A: Cognition parity hardening
 
 Goal:
-- Move from baseline movement + lightweight social events to richer memory-aware behavior.
+- Stabilize the upgraded cognition runtime and close key parity gaps where needed.
 
 Tasks:
-- Integrate memory read/write per tick (events, social, goals)
-- Add retrieval-aware planner context assembly
-- Add reflection scheduling and persistence
-- Keep strict policy caps and fallback chain
+- Add persistence snapshots for cognition state across runtime restarts.
+- Expand schedule decomposition and chat follow-up nuance.
+- Add deeper regression tests for memory/retrieval/reflection quality.
 
 Exit criteria:
-- Tick behavior reflects relationship/history context, not only immediate state.
+- Cognition behavior remains stable and explainable across long runs.
 
 ### Phase B: Provider adapters + runtime hardening
 
@@ -109,4 +114,4 @@ uvicorn apps.api.vvalley_api.main:app --reload --port 8080
 python3 -m http.server 4173 --directory apps/web
 ```
 
-Last updated: February 7, 2026
+Last updated: February 8, 2026

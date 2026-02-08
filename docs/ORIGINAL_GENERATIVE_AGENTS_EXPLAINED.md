@@ -224,8 +224,36 @@ And modernizes around them:
 - explicit simulation service boundaries
 - optional hosted and self-hosted operation
 
-Current status:
-- baseline runtime + policy scaffolding is implemented.
-- full memory-rich cognitive loop integration is the next major milestone.
+Current status (as of February 8, 2026):
+- Implemented:
+  - associative memory stream with event/thought/chat/reflection nodes
+  - spatial memory tree structure
+  - scratch-like state (schedule/action/chat/path/reflection counters)
+  - weighted retrieval with recency/relevance/importance components
+  - reflection trigger with evidence-linked outputs
+  - goal-based path movement and social memory ingestion
+- Not fully one-to-one yet:
+  - full prompt-template parity with all original planning/chat variants
+  - exact file-based replay compatibility of original backend/frontend storage model
+  - some nuanced task decomposition routines from the research code
 
-Last updated: February 7, 2026
+## 12. Memory-system comparison (original vs V-Valley)
+
+Is V-Valley memory "better" than the original?
+- Better for product deployment and controllability.
+- Not strictly "better" in full research behavior parity yet.
+
+Quick comparison:
+- Original strengths:
+  - richer prompt-crafted planning and conversation decomposition
+  - closer to research-demo behavior
+- V-Valley strengths:
+  - API-native runtime
+  - policy-bounded cognition routing
+  - service-oriented architecture with auth/ownership boundaries
+  - deterministic fallback behavior for reliability
+- Remaining parity work:
+  - more nuanced long-horizon planning prompts
+  - deeper conversation scheduling and decomposition variants
+
+Last updated: February 8, 2026
