@@ -9,7 +9,7 @@ from .policy import (
     situational_default_preset_policies,
     resolve_fallback_chain,
 )
-from .providers import execute_tier_model
+from .providers import DEFAULT_MODEL_BY_TIER, default_model_for_tier, execute_tier_model
 
 __all__ = [
     "ALLOWED_MODEL_TIERS",
@@ -19,5 +19,7 @@ __all__ = [
     "fun_low_cost_preset_policies",
     "situational_default_preset_policies",
     "resolve_fallback_chain",
+    "DEFAULT_MODEL_BY_TIER",
+    "default_model_for_tier",
     "execute_tier_model",
 ]

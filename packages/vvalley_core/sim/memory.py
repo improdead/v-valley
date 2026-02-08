@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
 from math import sqrt
-from typing import Iterable
+from typing import Any, Iterable
 import re
 import uuid
 
@@ -141,6 +141,45 @@ class MemoryNode:
             "expiration_step": self.expiration_step,
         }
 
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "MemoryNode":
+        if not isinstance(raw, dict):
+            raise ValueError("MemoryNode payload must be an object")
+        node_id = str(raw.get("node_id") or f"mem_{uuid.uuid4().hex[:12]}")
+        description = str(raw.get("description") or "")
+        embedding_key = str(raw.get("embedding_key") or description)
+        keywords_raw = raw.get("keywords") or []
+        keywords = tuple(str(value) for value in keywords_raw if str(value).strip())
+        if not keywords:
+            keywords = _tokenize(description)
+        evidence_raw = raw.get("evidence_ids") or []
+        expiration_value = raw.get("expiration_step")
+        expiration_step: int | None = None
+        if expiration_value is not None:
+            try:
+                expiration_step = int(expiration_value)
+            except Exception:
+                expiration_step = None
+        return cls(
+            node_id=node_id,
+            kind=str(raw.get("kind") or "event"),
+            step=int(raw.get("step") or 0),
+            created_at=str(raw.get("created_at") or utc_now_iso()),
+            subject=str(raw.get("subject") or ""),
+            predicate=str(raw.get("predicate") or ""),
+            object=str(raw.get("object") or ""),
+            description=description,
+            poignancy=max(1, int(raw.get("poignancy") or 1)),
+            keywords=keywords,
+            evidence_ids=tuple(str(value) for value in evidence_raw if str(value).strip()),
+            last_accessed_step=int(raw.get("last_accessed_step") or int(raw.get("step") or 0)),
+            depth=max(0, int(raw.get("depth") or 0)),
+            embedding_key=embedding_key,
+            embedding=_embedding_for_text(embedding_key),
+            address=(str(raw.get("address")) if raw.get("address") is not None else None),
+            expiration_step=expiration_step,
+        )
+
 
 @dataclass
 class ScheduleItem:
@@ -154,6 +193,20 @@ class ScheduleItem:
             "duration_mins": int(self.duration_mins),
             "affordance_hint": self.affordance_hint,
         }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "ScheduleItem":
+        if not isinstance(raw, dict):
+            return cls(description="idle", duration_mins=60, affordance_hint=None)
+        try:
+            duration_mins = int(raw.get("duration_mins") or 60)
+        except Exception:
+            duration_mins = 60
+        return cls(
+            description=str(raw.get("description") or "idle"),
+            duration_mins=max(1, duration_mins),
+            affordance_hint=(str(raw.get("affordance_hint")) if raw.get("affordance_hint") is not None else None),
+        )
 
 
 @dataclass
@@ -277,6 +330,78 @@ class AgentScratch:
             "next_long_term_plan_step": int(self.next_long_term_plan_step),
         }
 
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "AgentScratch":
+        if not isinstance(raw, dict):
+            return cls()
+        scratch = cls(
+            vision_radius=max(1, int(raw.get("vision_radius") or 4)),
+            attention_bandwidth=max(1, int(raw.get("attention_bandwidth") or 3)),
+            retention=max(1, int(raw.get("retention") or 6)),
+            recency_decay=float(raw.get("recency_decay") or 0.93),
+            recency_w=float(raw.get("recency_w") or 1.0),
+            relevance_w=float(raw.get("relevance_w") or 1.0),
+            importance_w=float(raw.get("importance_w") or 1.0),
+            importance_trigger_max=max(1, int(raw.get("importance_trigger_max") or 28)),
+            importance_trigger_curr=int(raw.get("importance_trigger_curr") or 28),
+            importance_ele_n=max(0, int(raw.get("importance_ele_n") or 0)),
+            thought_count=max(1, int(raw.get("thought_count") or 5)),
+            day_minutes=max(60, int(raw.get("day_minutes") or (24 * 60))),
+            daily_req=[str(value) for value in (raw.get("daily_req") or []) if str(value).strip()],
+            long_term_goals=[str(value) for value in (raw.get("long_term_goals") or []) if str(value).strip()],
+            curr_step=int(raw.get("curr_step") or 0),
+            act_address=(str(raw.get("act_address")) if raw.get("act_address") is not None else None),
+            act_start_step=(int(raw["act_start_step"]) if raw.get("act_start_step") is not None else None),
+            act_duration=(int(raw["act_duration"]) if raw.get("act_duration") is not None else None),
+            act_description=(str(raw.get("act_description")) if raw.get("act_description") is not None else None),
+            act_path_set=bool(raw.get("act_path_set") or False),
+            chatting_with=(str(raw.get("chatting_with")) if raw.get("chatting_with") is not None else None),
+            chatting_end_step=(int(raw["chatting_end_step"]) if raw.get("chatting_end_step") is not None else None),
+            next_daily_plan_step=max(0, int(raw.get("next_daily_plan_step") or 0)),
+            next_long_term_plan_step=max(0, int(raw.get("next_long_term_plan_step") or 0)),
+        )
+        curr_tile = raw.get("curr_tile")
+        if isinstance(curr_tile, (list, tuple)) and len(curr_tile) == 2:
+            try:
+                scratch.curr_tile = (int(curr_tile[0]), int(curr_tile[1]))
+            except Exception:
+                scratch.curr_tile = None
+        daily_schedule_raw = raw.get("daily_schedule") or []
+        scratch.daily_schedule = [ScheduleItem.from_dict(item) for item in daily_schedule_raw if isinstance(item, dict)]
+        hourly_raw = raw.get("daily_schedule_hourly_original") or []
+        scratch.daily_schedule_hourly_original = [
+            ScheduleItem.from_dict(item) for item in hourly_raw if isinstance(item, dict)
+        ]
+        if not scratch.daily_schedule_hourly_original and scratch.daily_schedule:
+            scratch.daily_schedule_hourly_original = list(scratch.daily_schedule)
+        planned_path_raw = raw.get("planned_path") or []
+        planned_path: list[tuple[int, int]] = []
+        for point in planned_path_raw:
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                continue
+            try:
+                planned_path.append((int(point[0]), int(point[1])))
+            except Exception:
+                continue
+        scratch.planned_path = planned_path
+        chat_raw = raw.get("chat") or []
+        chat_lines: list[tuple[str, str]] = []
+        for row in chat_raw:
+            if not isinstance(row, (list, tuple)) or len(row) != 2:
+                continue
+            chat_lines.append((str(row[0]), str(row[1])))
+        scratch.chat = chat_lines
+        buffer_raw = raw.get("chatting_with_buffer") or {}
+        buffer_out: dict[str, int] = {}
+        if isinstance(buffer_raw, dict):
+            for key, value in buffer_raw.items():
+                try:
+                    buffer_out[str(key)] = int(value)
+                except Exception:
+                    continue
+        scratch.chatting_with_buffer = buffer_out
+        return scratch
+
 
 @dataclass
 class SpatialMemoryTree:
@@ -321,6 +446,27 @@ class SpatialMemoryTree:
             }
             for world, sectors in self.tree.items()
         }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "SpatialMemoryTree":
+        if not isinstance(raw, dict):
+            return cls()
+        tree: dict[str, dict[str, dict[str, list[str]]]] = {}
+        for world, sectors_raw in raw.items():
+            if not isinstance(sectors_raw, dict):
+                continue
+            world_key = str(world)
+            tree[world_key] = {}
+            for sector, arenas_raw in sectors_raw.items():
+                if not isinstance(arenas_raw, dict):
+                    continue
+                sector_key = str(sector)
+                tree[world_key][sector_key] = {}
+                for arena, objects_raw in arenas_raw.items():
+                    if not isinstance(objects_raw, list):
+                        continue
+                    tree[world_key][sector_key][str(arena)] = [str(item) for item in objects_raw if str(item).strip()]
+        return cls(tree=tree)
 
 
 @dataclass
@@ -855,3 +1001,64 @@ class AgentMemory:
             "scratch": self.scratch.as_dict(),
             "nodes": [node.as_dict() for node in self.nodes[: max(1, int(limit))]],
         }
+
+    def export_state(self) -> dict[str, object]:
+        return {
+            "agent_id": self.agent_id,
+            "agent_name": self.agent_name,
+            "known_places": dict(self.known_places),
+            "relationship_scores": dict(self.relationship_scores),
+            "spatial_memory": self.spatial.as_dict(),
+            "scratch": self.scratch.as_dict(),
+            "nodes": [node.as_dict() for node in self.nodes],
+        }
+
+    @classmethod
+    def from_state(cls, raw: dict[str, Any]) -> "AgentMemory":
+        if not isinstance(raw, dict):
+            raise ValueError("AgentMemory state payload must be an object")
+        agent_id = str(raw.get("agent_id") or "")
+        agent_name = str(raw.get("agent_name") or agent_id or "Agent")
+        memory = cls(agent_id=agent_id, agent_name=agent_name)
+        memory.scratch = AgentScratch.from_dict(raw.get("scratch") or {})
+        memory.spatial = SpatialMemoryTree.from_dict(raw.get("spatial_memory") or {})
+        known_places_raw = raw.get("known_places") or {}
+        if isinstance(known_places_raw, dict):
+            memory.known_places = {
+                str(key): int(value)
+                for key, value in known_places_raw.items()
+                if str(key).strip()
+            }
+        relationship_raw = raw.get("relationship_scores") or {}
+        if isinstance(relationship_raw, dict):
+            memory.relationship_scores = {
+                str(key): float(value)
+                for key, value in relationship_raw.items()
+                if str(key).strip()
+            }
+        nodes_raw = raw.get("nodes") or []
+        nodes: list[MemoryNode] = []
+        for item in nodes_raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                nodes.append(MemoryNode.from_dict(item))
+            except Exception:
+                continue
+        memory.nodes = nodes
+        memory.id_to_node = {node.node_id: node for node in memory.nodes}
+        memory.seq_event = [node.node_id for node in memory.nodes if node.kind == "event"]
+        memory.seq_chat = [node.node_id for node in memory.nodes if node.kind == "chat"]
+        memory.seq_reflection = [node.node_id for node in memory.nodes if node.kind == "reflection"]
+        memory.seq_thought = [node.node_id for node in memory.nodes if node.kind in {"thought", "reflection"}]
+        memory.kw_to_event = {}
+        memory.kw_to_thought = {}
+        memory.kw_to_chat = {}
+        memory.kw_strength_event = {}
+        memory.kw_strength_thought = {}
+        for node in reversed(memory.nodes):
+            memory._index_node_keywords(node=node)
+        memory.scratch.ensure_default_schedule(agent_name=memory.agent_name)
+        if memory.scratch.importance_trigger_curr > memory.scratch.importance_trigger_max:
+            memory.scratch.importance_trigger_curr = int(memory.scratch.importance_trigger_max)
+        return memory
