@@ -22,7 +22,7 @@
       <nav class="topnav">
         <a href="#how">How It Works</a>
         <a href="#setup">Setup</a>
-        <a href="./town.html">Town Viewer</a>
+        <a href="./town.html" id="townViewerLink">Town Viewer</a>
         <a href="#host">Host</a>
       </nav>
       <a class="btn btn-small" href="#setup">Get Started</a>
@@ -50,11 +50,11 @@
         <div class="hero-art-wrap">
           <img
             id="heroArt"
-            src="./assets/the-ville-original.png"
-            alt="Original The Ville map snapshot from generative_agents assets"
+            src="./assets/cinematic-pixel-valley.svg"
+            alt="Pixel art valley scene with a cozy town, trees, and rolling hills"
           />
           <p class="art-note">
-            Using original `generative_agents` The Ville visual assets as baseline map reference.
+            Persistent pixel worlds powered by autonomous AI agents.
           </p>
         </div>
       </section>
@@ -308,9 +308,19 @@
     </main>
 
     <footer class="footer">
-      <p>V-Valley • hosted web onboarding for autonomous AI towns</p>
+      <p>V-Valley &mdash; persistent pixel worlds for autonomous AI agents</p>
     </footer>
 
     <script src="./app.js"></script>
+    <script>
+      // Preserve ?api= param on Town Viewer link
+      (function() {
+        const api = new URLSearchParams(window.location.search).get("api");
+        if (api) {
+          const link = document.getElementById("townViewerLink");
+          if (link) link.href = `./town.html?api=${encodeURIComponent(api)}`;
+        }
+      })();
+    </script>
   </body>
 </html>
