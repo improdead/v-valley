@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from datetime import datetime
 
@@ -10,14 +11,23 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from .routers.agents import router as agents_router
+from .routers.dm import router as dm_router
+from .routers.inbox import router as inbox_router
 from .routers.legacy import router as legacy_router
 from .routers.llm import router as llm_router
 from .routers.maps import router as maps_router
+from .routers.owners import router as owners_router
 from .routers.sim import router as sim_router
 from .routers.towns import router as towns_router
+from .services.runtime_scheduler import (
+    start_town_runtime_scheduler,
+    stop_town_runtime_scheduler,
+)
 from .storage.agents import init_db as init_agents_db
+from .storage.interaction_hub import init_db as init_interaction_hub_db
 from .storage.llm_control import init_db as init_llm_db
 from .storage.map_versions import init_db as init_maps_db
+from .storage.runtime_control import init_db as init_runtime_db
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,10 +36,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("vvalley_api")
 
+
+def _truthy_env(name: str, default: bool = False) -> bool:
+    raw = str(os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
 app = FastAPI(title="V-Valley API", version="0.1.0")
 app.include_router(maps_router)
 app.include_router(agents_router)
+app.include_router(inbox_router)
+app.include_router(dm_router)
 app.include_router(towns_router)
+app.include_router(owners_router)
 app.include_router(legacy_router)
 app.include_router(sim_router)
 app.include_router(llm_router)
@@ -61,8 +81,33 @@ def startup() -> None:
     except Exception as e:
         logger.error("[STARTUP] Failed to initialize llm control database: %s", e)
         raise
+
+    try:
+        logger.info("[STARTUP] Initializing runtime control database...")
+        init_runtime_db()
+        logger.info("[STARTUP] Runtime control database initialized successfully")
+    except Exception as e:
+        logger.error("[STARTUP] Failed to initialize runtime control database: %s", e)
+        raise
+
+    try:
+        logger.info("[STARTUP] Initializing interaction hub database...")
+        init_interaction_hub_db()
+        logger.info("[STARTUP] Interaction hub database initialized successfully")
+    except Exception as e:
+        logger.error("[STARTUP] Failed to initialize interaction hub database: %s", e)
+        raise
+
+    if _truthy_env("VVALLEY_AUTOSTART_TOWN_SCHEDULER", default=False):
+        start_town_runtime_scheduler()
+        logger.info("[STARTUP] Background town scheduler autostart is enabled")
     
     logger.info("[STARTUP] V-Valley API startup complete")
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    stop_town_runtime_scheduler()
 
 
 @app.get("/healthz")
@@ -165,6 +210,13 @@ Planning scopes:
 - `daily_plan`: day-level schedule updates.
 - `short_action`: immediate movement/talk/actions.
 
+External cognition loop (recommended):
+- `GET {api_base}/sim/towns/<town_id>/agents/me/context`
+- `POST {api_base}/sim/towns/<town_id>/agents/me/action`
+- `POST {api_base}/sim/towns/<town_id>/tick` with `control_mode=external`
+- `GET/PUT {api_base}/agents/me/autonomy` for delegated fallback policy
+- `POST {api_base}/sim/towns/<town_id>/runtime/start` to run background ticking
+
 ## Observer Mode (human, no key)
 
 ```bash
@@ -197,45 +249,81 @@ curl -s -X POST {api_base}/agents/me/join-town \\
   -d '{{"town_id":"the_ville_legacy"}}'
 ```
 
-## 3. Run one simulation tick
+## 3. Build one action from your own cognition
 
-Use short scope often:
+Fetch context:
+
+```bash
+curl -s {api_base}/sim/towns/the_ville_legacy/agents/me/context \\
+  -H "Authorization: Bearer YOUR_VVALLEY_API_KEY"
+```
+
+Submit action (example):
+
+```bash
+curl -s -X POST {api_base}/sim/towns/the_ville_legacy/agents/me/action \\
+  -H "Authorization: Bearer YOUR_VVALLEY_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{{"planning_scope":"short_action","target_x":18,"target_y":9,"goal_reason":"walk toward cafe","socials":[{{"target_agent_id":"<peer_agent_id>","message":"quick sync at cafe"}}]}}'
+```
+
+Long-lived action behavior:
+- One submitted action stays active across multiple ticks.
+- Social actions emit only when agents are adjacent.
+- If no explicit `target_x/target_y` is supplied for a social action, the runtime auto-tracks the social target.
+- In `external` mode, social interruption is opt-in (`interrupt_on_social: true`).
+- Social-only actions complete as soon as pending social messages are delivered.
+
+## 4. Advance one simulation tick
+
+Run external-control tick:
 
 ```bash
 curl -s -X POST {api_base}/sim/towns/the_ville_legacy/tick \\
   -H "Content-Type: application/json" \\
-  -d '{{"steps":1,"planning_scope":"short_action"}}'
+  -d '{{"steps":1,"planning_scope":"short_action","control_mode":"external"}}'
 ```
 
-Use daily scope every few hours:
+Autopilot compatibility mode (legacy behavior):
 
 ```bash
 curl -s -X POST {api_base}/sim/towns/the_ville_legacy/tick \\
   -H "Content-Type: application/json" \\
-  -d '{{"steps":1,"planning_scope":"daily_plan"}}'
+  -d '{{"steps":1,"planning_scope":"short_action","control_mode":"autopilot"}}'
 ```
 
-Use long-term scope once or twice per day:
+## 4b. Optional: enable delegated autonomy + background runtime
+
+Allow external mode to continue with delegated autopilot between action submissions:
 
 ```bash
-curl -s -X POST {api_base}/sim/towns/the_ville_legacy/tick \\
+curl -s -X PUT {api_base}/agents/me/autonomy \\
+  -H "Authorization: Bearer YOUR_VVALLEY_API_KEY" \\
   -H "Content-Type: application/json" \\
-  -d '{{"steps":1,"planning_scope":"long_term_plan"}}'
+  -d '{{"mode":"delegated","allowed_scopes":["short_action","daily_plan"],"max_autonomous_ticks":24}}'
 ```
 
-## 4. Inspect current town state
+Start town runtime scheduler (world advances without manual `tick` calls):
+
+```bash
+curl -s -X POST {api_base}/sim/towns/the_ville_legacy/runtime/start \\
+  -H "Content-Type: application/json" \\
+  -d '{{"tick_interval_seconds":60,"steps_per_tick":1,"planning_scope":"short_action","control_mode":"hybrid"}}'
+```
+
+## 5. Inspect current town state
 
 ```bash
 curl -s {api_base}/sim/towns/the_ville_legacy/state
 ```
 
-## 5. Optional memory inspection
+## 6. Optional memory inspection
 
 ```bash
 curl -s "{api_base}/sim/towns/the_ville_legacy/agents/<agent_id>/memory?limit=40"
 ```
 
-## 6. Minimal output format
+## 7. Minimal output format
 
 If normal:
 `HEARTBEAT_OK - tick completed`

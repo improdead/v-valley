@@ -19,6 +19,10 @@ from ..storage.agents import (
     rotate_api_key,
 )
 from ..storage.map_versions import list_versions
+from ..storage.runtime_control import (
+    get_agent_autonomy,
+    upsert_agent_autonomy,
+)
 
 logger = logging.getLogger("vvalley_api.agents")
 
@@ -43,6 +47,13 @@ class ClaimAgentRequest(BaseModel):
 
 class JoinTownRequest(BaseModel):
     town_id: str = Field(min_length=1, max_length=80)
+
+
+class UpdateAutonomyRequest(BaseModel):
+    mode: str = Field(default="manual", pattern="^(manual|delegated|autonomous)$")
+    allowed_scopes: list[str] = Field(default_factory=lambda: ["short_action", "daily_plan", "long_term_plan"])
+    max_autonomous_ticks: int = Field(default=0, ge=0, le=100000)
+    escalation_policy: Optional[dict[str, Any]] = None
 
 
 def _require_bearer_token(authorization: Optional[str]) -> str:
@@ -198,6 +209,45 @@ def agent_me(authorization: Optional[str] = Header(default=None)) -> dict[str, A
             "personality": agent.get("personality", {}),
             "current_town": current_town,
         }
+    }
+
+
+@router.get("/me/autonomy")
+def get_me_autonomy(authorization: Optional[str] = Header(default=None)) -> dict[str, Any]:
+    api_key = _require_bearer_token(authorization)
+    agent = get_agent_by_api_key(api_key)
+    if not agent:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    contract = get_agent_autonomy(agent_id=str(agent["id"]))
+    return {
+        "ok": True,
+        "agent_id": str(agent["id"]),
+        "autonomy": contract,
+    }
+
+
+@router.put("/me/autonomy")
+def put_me_autonomy(
+    req: UpdateAutonomyRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    api_key = _require_bearer_token(authorization)
+    agent = get_agent_by_api_key(api_key)
+    if not agent:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    saved = upsert_agent_autonomy(
+        agent_id=str(agent["id"]),
+        mode=req.mode,
+        allowed_scopes=list(req.allowed_scopes),
+        max_autonomous_ticks=int(req.max_autonomous_ticks),
+        escalation_policy=req.escalation_policy,
+    )
+    if saved is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return {
+        "ok": True,
+        "agent_id": str(agent["id"]),
+        "autonomy": saved,
     }
 
 

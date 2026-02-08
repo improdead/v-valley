@@ -17,8 +17,10 @@ os.environ["VVALLEY_DB_PATH"] = str(TEST_DB_PATH)
 
 from apps.api.vvalley_api.main import app
 from apps.api.vvalley_api.storage.agents import reset_backend_cache_for_tests as reset_agents_backend
+from apps.api.vvalley_api.storage.interaction_hub import reset_backend_cache_for_tests as reset_interaction_backend
 from apps.api.vvalley_api.storage.llm_control import reset_backend_cache_for_tests as reset_llm_backend
 from apps.api.vvalley_api.storage.map_versions import reset_backend_cache_for_tests as reset_maps_backend
+from apps.api.vvalley_api.storage.runtime_control import reset_backend_cache_for_tests as reset_runtime_backend
 
 
 class TownsApiTests(unittest.TestCase):
@@ -29,6 +31,8 @@ class TownsApiTests(unittest.TestCase):
         reset_agents_backend()
         reset_maps_backend()
         reset_llm_backend()
+        reset_runtime_backend()
+        reset_interaction_backend()
         self.client = TestClient(app)
 
     def test_town_directory_empty_then_populated(self) -> None:

@@ -17,8 +17,10 @@ os.environ["VVALLEY_DB_PATH"] = str(TEST_DB_PATH)
 
 from apps.api.vvalley_api.main import app
 from apps.api.vvalley_api.storage.agents import reset_backend_cache_for_tests as reset_agents_backend
+from apps.api.vvalley_api.storage.interaction_hub import reset_backend_cache_for_tests as reset_interaction_backend
 from apps.api.vvalley_api.storage.llm_control import reset_backend_cache_for_tests as reset_llm_backend
 from apps.api.vvalley_api.storage.map_versions import reset_backend_cache_for_tests as reset_maps_backend
+from apps.api.vvalley_api.storage.runtime_control import reset_backend_cache_for_tests as reset_runtime_backend
 
 
 class AgentsApiTests(unittest.TestCase):
@@ -29,6 +31,8 @@ class AgentsApiTests(unittest.TestCase):
         reset_agents_backend()
         reset_maps_backend()
         reset_llm_backend()
+        reset_runtime_backend()
+        reset_interaction_backend()
         self.client = TestClient(app)
 
     def test_register_and_me_pending(self) -> None:
@@ -265,6 +269,43 @@ class AgentsApiTests(unittest.TestCase):
             headers={"Authorization": f"Bearer {overflow['api_key']}"},
         )
         self.assertEqual(blocked.status_code, 409)
+
+    def test_agent_autonomy_contract_defaults_and_update(self) -> None:
+        registered = self.client.post(
+            "/api/v1/agents/register",
+            json={"name": "AutonomyAgent", "owner_handle": "dekai", "auto_claim": True},
+        ).json()["agent"]
+        api_key = registered["api_key"]
+
+        current = self.client.get(
+            "/api/v1/agents/me/autonomy",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        self.assertEqual(current.status_code, 200)
+        autonomy = current.json()["autonomy"]
+        self.assertEqual(autonomy["mode"], "manual")
+        self.assertEqual(
+            autonomy["allowed_scopes"],
+            ["short_action", "daily_plan", "long_term_plan"],
+        )
+        self.assertEqual(int(autonomy["max_autonomous_ticks"]), 0)
+
+        updated = self.client.put(
+            "/api/v1/agents/me/autonomy",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "mode": "delegated",
+                "allowed_scopes": ["short_action", "daily_plan"],
+                "max_autonomous_ticks": 5,
+                "escalation_policy": {"on_limit_reached": "enqueue_owner"},
+            },
+        )
+        self.assertEqual(updated.status_code, 200)
+        saved = updated.json()["autonomy"]
+        self.assertEqual(saved["mode"], "delegated")
+        self.assertEqual(saved["allowed_scopes"], ["short_action", "daily_plan"])
+        self.assertEqual(int(saved["max_autonomous_ticks"]), 5)
+        self.assertEqual(saved["escalation_policy"]["on_limit_reached"], "enqueue_owner")
 
 
 if __name__ == "__main__":
