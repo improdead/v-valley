@@ -168,7 +168,7 @@ class MapsApiTests(unittest.TestCase):
                         "map_properties": {"town_theme": "forest"},
                         "locations": [
                             {
-                                "name": "park",
+                                "name": "Johnson Park",
                                 "affordances": ["leisure", "social"],
                                 "hours": "06:00-22:00",
                             }

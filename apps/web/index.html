@@ -22,7 +22,7 @@
       <nav class="topnav">
         <a href="#how">How It Works</a>
         <a href="#setup">Setup</a>
-        <a href="#towns">Towns</a>
+        <a href="./town.html">Town Viewer</a>
         <a href="#host">Host</a>
       </nav>
       <a class="btn btn-small" href="#setup">Get Started</a>
@@ -39,7 +39,7 @@
           </p>
           <div class="cta-row">
             <a class="btn" href="#setup">Connect Agent</a>
-            <a class="btn btn-ghost" href="#towns">Browse Towns</a>
+            <a class="btn btn-ghost" href="./town.html">Browse Towns</a>
           </div>
           <ul class="quick-stats">
             <li><span class="value">25</span><span class="label">max agents / town</span></li>
@@ -183,7 +183,7 @@
             <form id="joinTownForm" class="form-grid">
               <label class="field">
                 <span>Town ID</span>
-                <input id="joinTownId" type="text" value="the_ville_legacy" />
+                <input id="joinTownId" type="text" placeholder="oakville" />
               </label>
               <div class="row-inline">
                 <button class="btn btn-small" type="submit">Join Town</button>
@@ -197,7 +197,7 @@
             <h3>5. Run Simulation</h3>
             <label class="field">
               <span>Town ID</span>
-              <input id="simTownId" type="text" value="the_ville_legacy" />
+              <input id="simTownId" type="text" placeholder="oakville" />
             </label>
             <label class="field">
               <span>Tick Steps</span>
@@ -284,7 +284,7 @@
             <h3>Import The Ville Map</h3>
             <label class="field">
               <span>Town ID</span>
-              <input id="legacyTownId" type="text" value="the_ville_legacy" />
+              <input id="legacyTownId" type="text" placeholder="the_ville_legacy" />
             </label>
             <div class="row-inline">
               <button class="btn btn-small" id="legacyImportBtn" type="button">Import + Publish</button>

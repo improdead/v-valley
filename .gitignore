@@ -1,0 +1,12 @@
+# Runtime artifacts
+assets/maps/v_valley/
+data/*.db
+
+# OS
+.DS_Store
+__pycache__/
+*.pyc
+
+# Environment
+.env
+*.egg-info/

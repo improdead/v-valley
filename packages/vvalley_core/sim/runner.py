@@ -1998,7 +1998,7 @@ class SimulationRunner:
         normalized["socials"] = normalized_socials
         normalized["_socials_pending"] = normalized_socials_pending
 
-        default_ttl_steps = 40 if normalized_socials else 6
+        default_ttl_steps = 200 if normalized_socials else 6
         try:
             action_ttl_steps = int(action.get("action_ttl_steps", default_ttl_steps))
         except Exception:

@@ -5,13 +5,13 @@
   },
   "locations": [
     {
-      "name": "cafe",
+      "name": "Hobbs Cafe",
       "affordances": ["food", "social"],
       "hours": "06:30-22:00",
       "zone_rules": ["quiet_zone"]
     },
     {
-      "name": "park",
+      "name": "Johnson Park",
       "affordances": ["leisure", "social"],
       "hours": "06:00-23:00",
       "zone_rules": ["no_chat_zone"]
@@ -19,9 +19,9 @@
   ],
   "spawns": [
     {
-      "name": "spawn_a",
-      "x": 6,
-      "y": 11
+      "name": "artist_sp-a",
+      "x": 16,
+      "y": 16
     }
   ]
 }

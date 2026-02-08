@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>V-Valley | Town Viewer</title>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.55.2/dist/phaser.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      overflow: hidden;
+      height: 100vh;
+    }
+
+    /* Top bar */
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 16px;
+      background: #16213e;
+      border-bottom: 1px solid #0f3460;
+      z-index: 100;
+      position: relative;
+    }
+    .topbar .brand {
+      font-weight: 700;
+      font-size: 18px;
+      color: #e94560;
+      text-decoration: none;
+      margin-right: 16px;
+    }
+    .topbar select, .topbar button, .topbar input {
+      padding: 6px 10px;
+      border-radius: 4px;
+      border: 1px solid #0f3460;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      font-size: 13px;
+    }
+    .topbar select { min-width: 180px; }
+    .topbar button {
+      cursor: pointer;
+      background: #0f3460;
+      border-color: #e94560;
+      transition: background 0.2s;
+    }
+    .topbar button:hover { background: #e94560; }
+    .topbar button.active { background: #e94560; }
+    .topbar .spacer { flex: 1; }
+    .topbar .game-time {
+      font-size: 14px;
+      color: #53d8fb;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+    .topbar .step-count {
+      font-size: 12px;
+      color: #888;
+    }
+
+    /* Main layout */
+    .main-layout {
+      display: flex;
+      height: calc(100vh - 44px);
+    }
+
+    /* Game canvas area */
+    #game-container {
+      flex: 1;
+      background: #111;
+      position: relative;
+    }
+    #game-container canvas { display: block; }
+
+    /* Sidebar */
+    .sidebar {
+      width: 320px;
+      background: #16213e;
+      border-left: 1px solid #0f3460;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .sidebar h3 {
+      font-size: 13px;
+      text-transform: uppercase;
+      color: #53d8fb;
+      letter-spacing: 0.05em;
+      margin-bottom: 4px;
+    }
+    .agent-card {
+      background: #1a1a2e;
+      border: 1px solid #0f3460;
+      border-radius: 6px;
+      padding: 10px;
+      cursor: pointer;
+      transition: border-color 0.2s;
+    }
+    .agent-card:hover, .agent-card.focused { border-color: #e94560; }
+    .agent-card .agent-name {
+      font-weight: 600;
+      font-size: 14px;
+      color: #fff;
+      margin-bottom: 4px;
+    }
+    .agent-card .agent-owner {
+      font-size: 11px;
+      color: #888;
+      margin-bottom: 6px;
+    }
+    .agent-card .agent-action {
+      font-size: 12px;
+      color: #aaa;
+      line-height: 1.4;
+    }
+    .agent-card .agent-pos {
+      font-size: 11px;
+      color: #666;
+      margin-top: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+    .agent-card .agent-pronunciatio {
+      font-size: 20px;
+      float: right;
+      margin-top: -4px;
+    }
+
+    /* Conversations panel */
+    .convo-card {
+      background: #1a1a2e;
+      border: 1px solid #0f3460;
+      border-radius: 6px;
+      padding: 10px;
+      font-size: 12px;
+    }
+    .convo-card .convo-agents { color: #53d8fb; font-weight: 600; margin-bottom: 4px; }
+    .convo-card .convo-msg { color: #ccc; font-style: italic; }
+
+    /* Empty state */
+    .empty-state {
+      text-align: center;
+      padding: 40px 20px;
+      color: #666;
+    }
+    .empty-state p { margin-top: 8px; font-size: 13px; }
+
+    /* Loading overlay */
+    #loading-overlay {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.8);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 50;
+      font-size: 18px;
+      color: #53d8fb;
+    }
+
+    /* Back link */
+    .back-link {
+      color: #888;
+      text-decoration: none;
+      font-size: 13px;
+    }
+    .back-link:hover { color: #e94560; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <a class="back-link" href="./index.html">&larr; Home</a>
+    <a class="brand" href="#">V-Valley</a>
+    <select id="townSelect">
+      <option value="">-- Select Town --</option>
+    </select>
+    <button id="btnRefreshTowns" title="Refresh town list">Refresh</button>
+    <div class="spacer"></div>
+    <button id="btnTick" title="Advance 1 simulation step">Tick</button>
+    <button id="btnAutoTick" title="Auto-tick every few seconds">Auto</button>
+    <select id="tickScope">
+      <option value="short_action">Short Action</option>
+      <option value="daily_plan">Daily Plan</option>
+      <option value="long_term_plan">Long Term</option>
+    </select>
+    <select id="tickMode">
+      <option value="external">External</option>
+      <option value="autopilot">Autopilot</option>
+      <option value="hybrid">Hybrid</option>
+    </select>
+    <div class="spacer"></div>
+    <span class="game-time" id="gameTime">--:--</span>
+    <span class="step-count" id="stepCount">step --</span>
+  </div>
+
+  <div class="main-layout">
+    <div id="game-container">
+      <div id="loading-overlay">Select a town to begin</div>
+    </div>
+    <div class="sidebar" id="sidebar">
+      <h3>Agents</h3>
+      <div id="agentList">
+        <div class="empty-state">
+          <p>No agents yet</p>
+        </div>
+      </div>
+      <h3>Conversations</h3>
+      <div id="convoList">
+        <div class="empty-state">
+          <p>No active conversations</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="./town.js"></script>
+</body>
+</html>

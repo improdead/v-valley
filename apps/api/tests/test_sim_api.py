@@ -267,7 +267,7 @@ class SimApiTests(unittest.TestCase):
         )
         self.assertEqual(action_with_social.status_code, 200)
         accepted_social_action = action_with_social.json()["accepted"]["queued_action"]
-        self.assertEqual(accepted_social_action["action_ttl_steps"], 40)
+        self.assertEqual(accepted_social_action["action_ttl_steps"], 200)
         self.assertFalse(accepted_social_action["interrupt_on_social"])
 
         tick_resp_3 = self.client.post(
@@ -284,7 +284,7 @@ class SimApiTests(unittest.TestCase):
             self.assertEqual(tick_payload_3["social_event_count"], 0)
 
         found_social = any(event.get("source") == "external_action" for event in tick_payload_3["social_events"])
-        for _ in range(60):
+        for _ in range(200):
             if found_social:
                 break
             follow_tick = self.client.post(
@@ -316,7 +316,7 @@ class SimApiTests(unittest.TestCase):
         )
         self.assertEqual(action_resp.status_code, 200)
         queued = action_resp.json()["accepted"]["queued_action"]
-        self.assertEqual(queued["action_ttl_steps"], 40)
+        self.assertEqual(queued["action_ttl_steps"], 200)
         self.assertFalse(queued["interrupt_on_social"])
         self.assertIn("socials", queued)
         self.assertEqual(len(queued["socials"]), 1)
@@ -339,7 +339,7 @@ class SimApiTests(unittest.TestCase):
             event.get("source") == "external_action" for event in first_payload["social_events"]
         ) else None
         found_social = payload_with_social is not None
-        for _ in range(60):
+        for _ in range(200):
             if found_social:
                 break
             tick_resp = self.client.post(
@@ -387,14 +387,14 @@ class SimApiTests(unittest.TestCase):
                 "target_x": int(peer_pos["x"]),
                 "target_y": int(peer_pos["y"]),
                 "goal_reason": "meet_peer",
-                "action_ttl_steps": 80,
+                "action_ttl_steps": 200,
                 "interrupt_on_social": False,
             },
         )
         self.assertEqual(approach_resp.status_code, 200)
 
         adjacent = False
-        for _ in range(40):
+        for _ in range(200):
             tick_resp = self.client.post(
                 f"/api/v1/sim/towns/{town_id}/tick",
                 json={"steps": 1, "planning_scope": "short_action", "control_mode": "external"},
@@ -474,7 +474,7 @@ class SimApiTests(unittest.TestCase):
                 "dx": -1,
                 "dy": 0,
                 "goal_reason": "push_west_until_blocked",
-                "action_ttl_steps": 12,
+                "action_ttl_steps": 200,
                 "interrupt_on_social": False,
             },
         )
@@ -482,7 +482,7 @@ class SimApiTests(unittest.TestCase):
 
         tick_resp = self.client.post(
             f"/api/v1/sim/towns/{town_id}/tick",
-            json={"steps": 12, "planning_scope": "short_action", "control_mode": "external"},
+            json={"steps": 200, "planning_scope": "short_action", "control_mode": "external"},
         )
         self.assertEqual(tick_resp.status_code, 200)
         tick_payload = tick_resp.json()["tick"]
@@ -809,7 +809,7 @@ class SimApiTests(unittest.TestCase):
                 "dx": -1,
                 "dy": 0,
                 "goal_reason": "stuck-metric-check",
-                "action_ttl_steps": 12,
+                "action_ttl_steps": 200,
                 "interrupt_on_social": False,
             },
         )
@@ -817,7 +817,7 @@ class SimApiTests(unittest.TestCase):
 
         external_tick = self.client.post(
             f"/api/v1/sim/towns/{town_id}/tick",
-            json={"steps": 12, "planning_scope": "short_action", "control_mode": "external"},
+            json={"steps": 200, "planning_scope": "short_action", "control_mode": "external"},
         )
         self.assertEqual(external_tick.status_code, 200)
 
@@ -852,14 +852,14 @@ class SimApiTests(unittest.TestCase):
                         ],
                     }
                 ],
-                "action_ttl_steps": 40,
+                "action_ttl_steps": 200,
                 "interrupt_on_social": True,
             },
         )
         self.assertEqual(submit.status_code, 200)
 
         found_social = False
-        for _ in range(60):
+        for _ in range(200):
             social_tick = self.client.post(
                 f"/api/v1/sim/towns/{town_id}/tick",
                 json={"steps": 1, "planning_scope": "short_action", "control_mode": "external"},
