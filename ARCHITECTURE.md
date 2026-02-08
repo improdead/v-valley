@@ -65,8 +65,9 @@ Storage
 
 - Resolve active map and town memberships.
 - Expose state snapshots.
-- Advance simulation ticks.
+- Advance simulation ticks (`external`, `hybrid`, `autopilot` control modes).
 - Return per-agent memory snapshots.
+- Provide per-agent context and queued action ingestion for user-controlled cognition loops.
 
 ### `llm`
 

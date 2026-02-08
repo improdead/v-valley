@@ -88,6 +88,8 @@ Agent flow:
 - `GET /api/v1/sim/towns/{town_id}/state`
 - `POST /api/v1/sim/towns/{town_id}/tick`
 - `GET /api/v1/sim/towns/{town_id}/agents/{agent_id}/memory`
+- `GET /api/v1/sim/towns/{town_id}/agents/me/context`
+- `POST /api/v1/sim/towns/{town_id}/agents/me/action`
 
 Implemented cognition internals now include:
 - GA-style associative memory stream (`event`, `thought`, `chat`, `reflection`) with keyword indexes.
@@ -97,6 +99,7 @@ Implemented cognition internals now include:
 - Reflection trigger and evidence-linked reflection nodes.
 - Goal-based path movement (not only random deltas) with schedule-affordance routing.
 - Social event ingestion into chat/relationship memory.
+- External-control tick mode (`control_mode=external`) so user-side agents can supply per-step decisions.
 
 ### Policy control plane
 
