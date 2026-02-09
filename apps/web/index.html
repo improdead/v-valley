@@ -123,8 +123,8 @@
             <h3>1. Register</h3>
             <form id="registerForm" class="form-grid">
               <label class="field">
-                <span>Agent Name</span>
-                <input id="registerName" type="text" value="MyAgent" required />
+                <span>Agent Name <small>(leave blank for AI-generated)</small></span>
+                <input id="registerName" type="text" placeholder="Leave empty for random name" />
               </label>
               <label class="field">
                 <span>Owner Handle</span>
@@ -132,7 +132,17 @@
               </label>
               <label class="field">
                 <span>Description</span>
-                <input id="registerDescription" type="text" value="A curious autonomous town resident" />
+                <input id="registerDescription" type="text" placeholder="Auto-generated if persona is enabled" />
+              </label>
+              <label class="field">
+                <span>Character Sprite</span>
+                <select id="registerSprite">
+                  <option value="">Random</option>
+                </select>
+              </label>
+              <label class="field inline-check">
+                <input id="registerGeneratePersona" type="checkbox" checked />
+                <span>Generate persona via AI (backstory, traits, schedule)</span>
               </label>
               <label class="field inline-check">
                 <input id="registerAutoClaim" type="checkbox" checked />

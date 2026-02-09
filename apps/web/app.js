@@ -235,14 +235,22 @@ async function onRegisterSubmit(event) {
   event.preventDefault();
   registerOutput.textContent = "Registering...";
   persistApiBase();
+  const generatePersona = document.getElementById("registerGeneratePersona")?.checked || false;
+  const spriteSel = document.getElementById("registerSprite");
+  const spriteName = spriteSel?.value || null;
+  if (generatePersona) {
+    registerOutput.textContent = "Generating persona via AI — this may take a few seconds...";
+  }
   try {
     const payload = await apiJson("/api/v1/agents/register", {
       method: "POST",
       body: {
-        name: document.getElementById("registerName").value.trim(),
+        name: document.getElementById("registerName").value.trim() || "",
         owner_handle: document.getElementById("registerOwner").value.trim() || null,
         description: document.getElementById("registerDescription").value.trim() || null,
         auto_claim: document.getElementById("registerAutoClaim").checked,
+        generate_persona: generatePersona,
+        sprite_name: spriteName || null,
       },
     });
     registerOutput.textContent = toPrettyJson(payload);
@@ -508,6 +516,36 @@ function initOnboardingConsole() {
   legacyImportBtn?.addEventListener("click", onLegacyImportClick);
   simStateBtn?.addEventListener("click", onSimStateClick);
   simTickBtn?.addEventListener("click", onSimTickClick);
+
+  // Populate sprite picker from API (fallback to static list)
+  const spriteSelect = document.getElementById("registerSprite");
+  if (spriteSelect) {
+    apiJson("/api/v1/agents/characters").then((data) => {
+      (data.characters || []).forEach((name) => {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name.replace(/_/g, " ");
+        spriteSelect.appendChild(opt);
+      });
+    }).catch(() => {
+      // Fallback: hardcoded list
+      const fallback = [
+        "Abigail_Chen", "Adam_Smith", "Arthur_Burton", "Ayesha_Khan",
+        "Carlos_Gomez", "Carmen_Ortiz", "Eddy_Lin", "Francisco_Lopez",
+        "Giorgio_Rossi", "Hailey_Johnson", "Isabella_Rodriguez", "Jane_Moreno",
+        "Jennifer_Moore", "John_Lin", "Klaus_Mueller", "Latoya_Williams",
+        "Maria_Lopez", "Mei_Lin", "Rajiv_Patel", "Ryan_Park",
+        "Sam_Moore", "Tamara_Taylor", "Tom_Moreno", "Wolfgang_Schulz",
+        "Yuriko_Yamamoto",
+      ];
+      fallback.forEach((name) => {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name.replace(/_/g, " ");
+        spriteSelect.appendChild(opt);
+      });
+    });
+  }
 }
 
 initChecklist();

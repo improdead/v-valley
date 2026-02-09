@@ -66,9 +66,13 @@
     return Math.abs(h);
   }
 
-  function assignCharacter(agentId) {
+  function assignCharacter(agentId, serverSpriteName) {
     if (!agentCharMap[agentId]) {
-      agentCharMap[agentId] = CHARACTER_SPRITES[hashStr(agentId) % CHARACTER_SPRITES.length];
+      if (serverSpriteName && CHARACTER_SPRITES.includes(serverSpriteName)) {
+        agentCharMap[agentId] = serverSpriteName;
+      } else {
+        agentCharMap[agentId] = CHARACTER_SPRITES[hashStr(agentId) % CHARACTER_SPRITES.length];
+      }
     }
     return agentCharMap[agentId];
   }
@@ -448,7 +452,7 @@
 
     npcs.forEach((npc) => {
       seenIds.add(npc.agent_id);
-      const charName = assignCharacter(npc.agent_id);
+      const charName = assignCharacter(npc.agent_id, npc.sprite_name);
       const atlasKey = `char_${charName}`;
       const targetX = npc.x * TILE_SIZE + TILE_SIZE / 2;
       const targetY = npc.y * TILE_SIZE + TILE_SIZE;

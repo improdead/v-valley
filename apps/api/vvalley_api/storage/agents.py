@@ -53,6 +53,7 @@ class AgentStore(ABC):
         name: str,
         description: Optional[str],
         personality: Optional[dict[str, Any]],
+        sprite_name: Optional[str] = None,
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -92,6 +93,14 @@ class AgentStore(ABC):
 
     @abstractmethod
     def list_active_agents_in_town(self, town_id: str) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def count_agents_by_owner(self, owner_handle: str) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_agent_sprite(self, *, agent_id: str, sprite_name: str) -> None:
         raise NotImplementedError
 
 
@@ -160,6 +169,11 @@ class SQLiteAgentStore(AgentStore):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_agent_town_memberships_town_id ON agent_town_memberships(town_id)"
             )
+            # Add sprite_name column if missing (SQLite has no IF NOT EXISTS for ALTER TABLE)
+            try:
+                conn.execute("ALTER TABLE agents ADD COLUMN sprite_name TEXT")
+            except sqlite3.OperationalError:
+                pass  # column already exists
         logger.info("[STORAGE] SQLite agent database initialized successfully")
 
     def register_agent(
@@ -168,6 +182,7 @@ class SQLiteAgentStore(AgentStore):
         name: str,
         description: Optional[str],
         personality: Optional[dict[str, Any]],
+        sprite_name: Optional[str] = None,
     ) -> dict[str, Any]:
         self.init_db()
         agent_id = str(uuid.uuid4())
@@ -182,8 +197,8 @@ class SQLiteAgentStore(AgentStore):
             conn.execute(
                 """
                 INSERT INTO agents
-                  (id, name, description, personality_json, api_key_hash, api_key_prefix, claim_token, verification_code)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  (id, name, description, personality_json, api_key_hash, api_key_prefix, claim_token, verification_code, sprite_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     agent_id,
@@ -194,6 +209,7 @@ class SQLiteAgentStore(AgentStore):
                     api_key[:16],
                     claim_token,
                     verification_code,
+                    sprite_name,
                 ),
             )
             row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
@@ -359,6 +375,9 @@ class SQLiteAgentStore(AgentStore):
                   a.name AS name,
                   a.claim_status AS claim_status,
                   a.owner_handle AS owner_handle,
+                  a.description AS description,
+                  a.personality_json AS personality_json,
+                  a.sprite_name AS sprite_name,
                   m.joined_at AS joined_at,
                   m.updated_at AS updated_at
                 FROM agent_town_memberships m
@@ -368,7 +387,28 @@ class SQLiteAgentStore(AgentStore):
                 """,
                 (town_id,),
             ).fetchall()
-        return [dict(r) for r in rows]
+        results = [dict(r) for r in rows]
+        for r in results:
+            raw = r.pop("personality_json", None)
+            r["personality"] = json.loads(raw) if isinstance(raw, str) and raw else {}
+        return results
+
+    def count_agents_by_owner(self, owner_handle: str) -> int:
+        self.init_db()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM agents WHERE owner_handle = ?",
+                (owner_handle,),
+            ).fetchone()
+        return int(row["c"]) if row else 0
+
+    def update_agent_sprite(self, *, agent_id: str, sprite_name: str) -> None:
+        self.init_db()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE agents SET sprite_name = ? WHERE id = ?",
+                (sprite_name, agent_id),
+            )
 
 
 class PostgresAgentStore(AgentStore):
@@ -436,6 +476,7 @@ class PostgresAgentStore(AgentStore):
         name: str,
         description: Optional[str],
         personality: Optional[dict[str, Any]],
+        sprite_name: Optional[str] = None,
     ) -> dict[str, Any]:
         self.init_db()
         agent_id = str(uuid.uuid4())
@@ -448,8 +489,8 @@ class PostgresAgentStore(AgentStore):
                 cur.execute(
                     """
                     INSERT INTO agents
-                      (id, name, description, personality_json, api_key_hash, api_key_prefix, claim_token, verification_code)
-                    VALUES (%s::uuid, %s, %s, %s::jsonb, %s, %s, %s, %s)
+                      (id, name, description, personality_json, api_key_hash, api_key_prefix, claim_token, verification_code, sprite_name)
+                    VALUES (%s::uuid, %s, %s, %s::jsonb, %s, %s, %s, %s, %s)
                     """,
                     (
                         agent_id,
@@ -460,6 +501,7 @@ class PostgresAgentStore(AgentStore):
                         api_key[:16],
                         claim_token,
                         verification_code,
+                        sprite_name,
                     ),
                 )
                 cur.execute("SELECT * FROM agents WHERE id = %s::uuid", (agent_id,))
@@ -611,6 +653,9 @@ class PostgresAgentStore(AgentStore):
                       a.name AS name,
                       a.claim_status AS claim_status,
                       a.owner_handle AS owner_handle,
+                      a.description AS description,
+                      a.personality_json AS personality_json,
+                      a.sprite_name AS sprite_name,
                       m.joined_at AS joined_at,
                       m.updated_at AS updated_at
                     FROM agent_town_memberships m
@@ -621,7 +666,36 @@ class PostgresAgentStore(AgentStore):
                     (town_id,),
                 )
                 rows = cur.fetchall()
-        return [dict(r) for r in rows]
+        results = [dict(r) for r in rows]
+        for r in results:
+            raw = r.pop("personality_json", None)
+            if isinstance(raw, str):
+                r["personality"] = json.loads(raw)
+            elif isinstance(raw, dict):
+                r["personality"] = raw
+            else:
+                r["personality"] = {}
+        return results
+
+    def count_agents_by_owner(self, owner_handle: str) -> int:
+        self.init_db()
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) AS c FROM agents WHERE owner_handle = %s",
+                    (owner_handle,),
+                )
+                row = cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    def update_agent_sprite(self, *, agent_id: str, sprite_name: str) -> None:
+        self.init_db()
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE agents SET sprite_name = %s WHERE id = %s::uuid",
+                    (sprite_name, agent_id),
+                )
 
 
 def _resolve_sqlite_path(database_url: Optional[str]) -> Path:
@@ -664,11 +738,13 @@ def register_agent(
     name: str,
     description: Optional[str] = None,
     personality: Optional[dict[str, Any]] = None,
+    sprite_name: Optional[str] = None,
 ) -> dict[str, Any]:
     return _backend().register_agent(
         name=name,
         description=description,
         personality=personality,
+        sprite_name=sprite_name,
     )
 
 
@@ -711,3 +787,11 @@ def count_active_agents_in_town(town_id: str) -> int:
 
 def list_active_agents_in_town(town_id: str) -> list[dict[str, Any]]:
     return _backend().list_active_agents_in_town(town_id)
+
+
+def count_agents_by_owner(owner_handle: str) -> int:
+    return _backend().count_agents_by_owner(owner_handle)
+
+
+def update_agent_sprite(*, agent_id: str, sprite_name: str) -> None:
+    _backend().update_agent_sprite(agent_id=agent_id, sprite_name=sprite_name)

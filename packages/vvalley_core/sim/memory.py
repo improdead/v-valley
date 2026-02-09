@@ -561,20 +561,72 @@ class AgentMemory:
         self.scratch.importance_ele_n = max(0, int(value))
 
     @classmethod
-    def bootstrap(cls, *, agent_id: str, agent_name: str, step: int) -> "AgentMemory":
+    def bootstrap(cls, *, agent_id: str, agent_name: str, step: int, persona: dict[str, Any] | None = None) -> "AgentMemory":
         memory = cls(agent_id=agent_id, agent_name=agent_name)
         memory.scratch.ensure_default_schedule(agent_name=agent_name)
-        memory.add_node(
-            kind="thought",
-            step=step,
-            subject=agent_name,
-            predicate="joins",
-            object="town",
-            description=f"{agent_name} has joined the town and is starting their routine.",
-            poignancy=2,
-            evidence_ids=(),
-            decrement_trigger=False,
-        )
+
+        if persona and isinstance(persona, dict):
+            # Persona-aware bootstrap — seed from GA-format persona
+            innate = persona.get("innate", "")
+            learned = persona.get("learned", "")
+            lifestyle = persona.get("lifestyle", "")
+            daily_req = persona.get("daily_req")
+            currently = persona.get("currently")
+
+            if isinstance(daily_req, list) and daily_req:
+                memory.scratch.daily_req = [str(r) for r in daily_req if str(r).strip()]
+
+            if currently and str(currently).strip():
+                memory.scratch.currently = str(currently).strip()
+
+            if learned and str(learned).strip():
+                memory.scratch.long_term_goals = [str(learned).strip()]
+
+            # Seed identity thought
+            identity_parts = [agent_name]
+            if innate:
+                identity_parts.append(f"is {innate}")
+            if lifestyle:
+                identity_parts.append(lifestyle)
+            identity_desc = ". ".join(identity_parts)
+            memory.add_node(
+                kind="thought",
+                step=step,
+                subject=agent_name,
+                predicate="is",
+                object="a town resident",
+                description=identity_desc,
+                poignancy=5,
+                evidence_ids=(),
+                decrement_trigger=False,
+            )
+
+            # Seed backstory memory
+            if learned and str(learned).strip():
+                memory.add_node(
+                    kind="thought",
+                    step=step,
+                    subject=agent_name,
+                    predicate="has background",
+                    object="life story",
+                    description=str(learned).strip(),
+                    poignancy=4,
+                    evidence_ids=(),
+                    decrement_trigger=False,
+                )
+        else:
+            # Generic bootstrap — no persona
+            memory.add_node(
+                kind="thought",
+                step=step,
+                subject=agent_name,
+                predicate="joins",
+                object="town",
+                description=f"{agent_name} has joined the town and is starting their routine.",
+                poignancy=2,
+                evidence_ids=(),
+                decrement_trigger=False,
+            )
         return memory
 
     def _node_keywords(self, *, subject: str, predicate: str, object_value: str, description: str) -> tuple[str, ...]:

@@ -126,6 +126,8 @@ class NpcState:
     goal_x: int | None = None
     goal_y: int | None = None
     goal_reason: str | None = None
+    sprite_name: str | None = None
+    persona: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -145,6 +147,8 @@ class NpcState:
                 "reason": self.goal_reason,
             },
             "memory_summary": self.memory.summary(),
+            "sprite_name": self.sprite_name,
+            "persona": self.persona,
         }
 
 
@@ -869,6 +873,8 @@ class SimulationRunner:
             "goal_x": npc.goal_x,
             "goal_y": npc.goal_y,
             "goal_reason": npc.goal_reason,
+            "sprite_name": npc.sprite_name,
+            "persona": npc.persona,
             "memory": npc.memory.export_state(),
         }
 
@@ -928,6 +934,8 @@ class SimulationRunner:
             goal_x=goal_x,
             goal_y=goal_y,
             goal_reason=(str(raw.get("goal_reason")) if raw.get("goal_reason") is not None else None),
+            sprite_name=(str(raw.get("sprite_name")) if raw.get("sprite_name") is not None else None),
+            persona=(raw.get("persona") if isinstance(raw.get("persona"), dict) else None),
         )
 
     def _serialize_runtime(self, runtime: TownRuntime) -> dict[str, Any]:
@@ -1918,6 +1926,7 @@ class SimulationRunner:
             "clock": self._clock_for_runtime(town=town),
             "agent_id": npc.agent_id,
             "agent_name": npc.name,
+            "persona": npc.persona,
             "planning_scope": planning_scope,
             "position": {"x": npc.x, "y": npc.y},
             "map": {"width": town.width, "height": town.height},
@@ -1949,6 +1958,7 @@ class SimulationRunner:
             "session_id": session.session_id,
             "partner_agent_id": partner.agent_id,
             "partner_name": partner.name,
+            "partner_persona": partner.persona,
             "source": session.source,
             "started_step": int(session.started_step),
             "last_step": int(session.last_step),
@@ -2320,6 +2330,7 @@ class SimulationRunner:
             npc = runtime.npcs.get(agent_id)
             if npc is None:
                 spawn_x, spawn_y = self._spawn_for(runtime, idx)
+                member_persona = member.get("personality") if isinstance(member.get("personality"), dict) else None
                 runtime.npcs[agent_id] = NpcState(
                     agent_id=agent_id,
                     name=str(member.get("name") or f"Agent-{agent_id[:8]}"),
@@ -2329,10 +2340,13 @@ class SimulationRunner:
                     y=spawn_y,
                     joined_at=member.get("joined_at"),
                     status="idle",
+                    sprite_name=member.get("sprite_name"),
+                    persona=member_persona,
                     memory=AgentMemory.bootstrap(
                         agent_id=agent_id,
                         agent_name=str(member.get("name") or f"Agent-{agent_id[:8]}"),
                         step=runtime.step,
+                        persona=member_persona,
                     ),
                 )
                 runtime.npcs[agent_id].memory.set_position(x=spawn_x, y=spawn_y, step=runtime.step)

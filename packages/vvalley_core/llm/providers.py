@@ -449,9 +449,10 @@ def _tier_provider_config(tier: str) -> TierProviderConfig:
 
 _TASK_PROMPTS: dict[str, tuple[str, str]] = {
     "plan_move": (
-        "You are a V-Valley agent movement planner. Return a JSON object with integer dx and dy "
+        "You are a V-Valley agent movement planner. The agent has a persona with personality traits, "
+        "occupation, and goals — use these to inform movement decisions. Return a JSON object with integer dx and dy "
         "(each -1, 0, or 1), a short reason string, and optionally target_x, target_y, goal_reason, affordance.",
-        "Decide the agent's next movement step based on the context below.\n"
+        "Decide the agent's next movement step based on their persona and context below.\n"
         "Output: JSON with dx, dy (integers -1..1), reason (string).\n\n"
     ),
     "short_action": (
@@ -461,9 +462,10 @@ _TASK_PROMPTS: dict[str, tuple[str, str]] = {
         "Output: JSON with dx, dy (integers -1..1), reason (string).\n\n"
     ),
     "reaction_policy": (
-        "You are a V-Valley social reaction evaluator. Decide whether an agent should talk, wait, or ignore "
-        "another nearby agent. Return a JSON object.",
-        "Evaluate whether the agent should initiate conversation.\n"
+        "You are a V-Valley social reaction evaluator. Each agent has a persona with personality traits "
+        "and background — use these to decide whether they should talk, wait, or ignore another nearby agent. "
+        "Return a JSON object.",
+        "Evaluate whether the agent should initiate conversation, considering their persona.\n"
         "Output: JSON with decision ('talk', 'wait', or 'ignore'), reason (string), "
         "and optionally wait_steps (integer 0-8).\n\n"
     ),
@@ -475,9 +477,10 @@ _TASK_PROMPTS: dict[str, tuple[str, str]] = {
         "Output: JSON with score (integer 1-10).\n\n"
     ),
     "conversation": (
-        "You are a V-Valley conversation generator. Create a realistic, memory-grounded conversation "
-        "between two agents. Return a JSON object with utterances and summary.",
-        "Generate a natural conversation between these two agents based on their memories and activities.\n"
+        "You are a V-Valley conversation generator. Each agent has a persona with innate traits, backstory, "
+        "and occupation — use these to make dialogue feel authentic and in-character. Create a realistic, "
+        "memory-grounded conversation between two agents. Return a JSON object with utterances and summary.",
+        "Generate a natural conversation between these two agents based on their personas, memories and activities.\n"
         "Output: JSON with utterances (array of {speaker, text}) and summary (string).\n\n"
     ),
     "focal_points": (
@@ -506,20 +509,39 @@ _TASK_PROMPTS: dict[str, tuple[str, str]] = {
         "Output: JSON with memo (string, key takeaway) and planning_thought (string, what to do next).\n\n"
     ),
     "conversation_turn": (
-        "You are a V-Valley conversation agent. Generate the next utterance for a character in an "
-        "ongoing conversation. Set end_conversation to true if the conversation should naturally end. "
+        "You are a V-Valley conversation agent. Each character has a persona with specific personality traits, "
+        "occupation, and background. Generate the next utterance staying true to their personality "
+        "and using their memories for context. Set end_conversation to true if the conversation should naturally end. "
         "Return a JSON object.",
-        "Generate the next line of dialogue for this character, staying in character and using their "
-        "memories for context. Set end_conversation=true if the exchange has reached a natural end.\n"
+        "Generate the next line of dialogue for this character, staying in character based on their persona "
+        "and using their memories for context. Set end_conversation=true if the exchange has reached a natural end.\n"
         "Output: JSON with utterance (string) and end_conversation (boolean).\n\n"
     ),
     "daily_schedule_gen": (
         "You are a V-Valley daily schedule planner. Generate a full day schedule for an agent "
-        "based on their personality, goals, and recent experiences. Also update their 'currently' "
+        "based on their persona (innate traits, occupation, lifestyle) and recent experiences. Also update their 'currently' "
         "status. Return a JSON object.",
-        "Generate a realistic daily schedule (activities with durations summing to 1440 minutes). "
+        "Generate a realistic daily schedule reflecting the agent's persona, occupation, and lifestyle "
+        "(activities with durations summing to 1440 minutes). "
         "Also provide a short 'currently' string describing the agent's identity and focus.\n"
         "Output: JSON with schedule (array of {description, duration_mins}) and currently (string).\n\n"
+    ),
+    "persona_gen": (
+        "You are a character creator for V-Valley, a small-town life simulation. Generate a unique, "
+        "believable character persona for a resident of a cozy pixel-art town. The character should feel "
+        "like a real person with specific habits, personality quirks, and a concrete daily routine. "
+        "Return a JSON object.",
+        "Create a complete character persona. If a name is provided in the context, use it. "
+        "Otherwise invent a fitting full name.\n"
+        "Output: JSON with these exact fields:\n"
+        "- first_name (string)\n"
+        "- last_name (string)\n"
+        "- age (integer, 18-75)\n"
+        "- innate (string, 3 comma-separated personality traits like 'friendly, curious, determined')\n"
+        "- learned (string, 1-2 sentence third-person backstory/biography)\n"
+        "- lifestyle (string, sleep/wake habits like 'goes to bed around 11pm, wakes at 7am')\n"
+        "- daily_plan_req (string, numbered daily plan)\n"
+        "- daily_req (array of 5-7 short activity strings with times)\n\n"
     ),
 }
 
@@ -810,3 +832,48 @@ def execute_tier_model(
         max_output_tokens=max_output_tokens,
         timeout_ms=timeout_ms,
     )
+
+
+def generate_persona(*, name: str | None = None, tier: str = "fast") -> dict[str, Any]:
+    """Generate a full GA-format character persona using the configured LLM.
+
+    Returns a dict with: first_name, last_name, age, innate, learned,
+    lifestyle, daily_plan_req, daily_req.
+    """
+    context = {}
+    if name and name.strip():
+        context["name"] = name.strip()
+    else:
+        context["instruction"] = "Invent a unique full name for this character."
+
+    result = execute_tier_model(
+        tier=tier,
+        task_name="persona_gen",
+        bounded_context_text=json.dumps(context, separators=(",", ":")),
+        temperature=0.9,
+        max_output_tokens=800,
+        timeout_ms=30_000,
+    )
+    persona = result.output
+
+    # Ensure required fields exist with fallbacks
+    if "first_name" not in persona:
+        persona["first_name"] = name.split()[0] if name else "Unknown"
+    if "last_name" not in persona:
+        parts = (name or "").split()
+        persona["last_name"] = parts[-1] if len(parts) > 1 else "Resident"
+    if "age" not in persona:
+        persona["age"] = 30
+    if "innate" not in persona:
+        persona["innate"] = "curious, friendly, adaptable"
+    if "learned" not in persona:
+        full_name = f"{persona['first_name']} {persona['last_name']}"
+        persona["learned"] = f"{full_name} is a resident of the town."
+    if "lifestyle" not in persona:
+        persona["lifestyle"] = "goes to bed around 11pm, wakes up around 7am"
+    if "daily_plan_req" not in persona:
+        persona["daily_plan_req"] = ""
+    if "daily_req" not in persona:
+        persona["daily_req"] = []
+
+    return persona

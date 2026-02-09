@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from typing import Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -11,12 +12,15 @@ from pydantic import BaseModel, Field
 from ..storage.agents import (
     claim_agent,
     count_active_agents_in_town,
+    count_agents_by_owner,
     get_agent_town,
     get_agent_by_api_key,
     join_agent_town,
     leave_agent_town,
+    list_active_agents_in_town,
     register_agent,
     rotate_api_key,
+    update_agent_sprite,
 )
 from ..storage.map_versions import list_versions, list_town_ids
 from ..storage.runtime_control import (
@@ -26,17 +30,29 @@ from ..storage.runtime_control import (
 
 logger = logging.getLogger("vvalley_api.agents")
 
+# 25 character sprites from GA — filenames without extension
+CHARACTER_SPRITES: list[str] = [
+    "Abigail_Chen", "Adam_Smith", "Arthur_Burton", "Ayesha_Khan",
+    "Carlos_Gomez", "Carmen_Ortiz", "Eddy_Lin", "Francisco_Lopez",
+    "Giorgio_Rossi", "Hailey_Johnson", "Isabella_Rodriguez", "Jane_Moreno",
+    "Jennifer_Moore", "John_Lin", "Klaus_Mueller", "Latoya_Williams",
+    "Maria_Lopez", "Mei_Lin", "Rajiv_Patel", "Ryan_Park",
+    "Sam_Moore", "Tamara_Taylor", "Tom_Moreno", "Wolfgang_Schulz",
+    "Yuriko_Yamamoto",
+]
 
 router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
 MAX_AGENTS_PER_TOWN = 25
 
 
 class RegisterAgentRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
+    name: str = Field(default="", max_length=80)
     description: Optional[str] = None
     personality: Optional[dict[str, Any]] = None
     owner_handle: Optional[str] = None
     auto_claim: bool = False
+    generate_persona: bool = False
+    sprite_name: Optional[str] = None
 
 
 class ClaimAgentRequest(BaseModel):
@@ -96,13 +112,55 @@ def agent_setup_info() -> dict[str, Any]:
 
 @router.post("/register")
 def register_agent_endpoint(req: RegisterAgentRequest, request: Request) -> dict[str, Any]:
-    logger.info("[AGENTS] Registering new agent: name='%s', owner_handle='%s', auto_claim=%s", 
-                req.name, req.owner_handle, req.auto_claim)
-    
+    # --- one agent per owner (except "dekai" for testing) ---
+    owner = (req.owner_handle or "").strip()
+    if owner and owner != "dekai":
+        existing = count_agents_by_owner(owner)
+        if existing > 0:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Owner '{owner}' already has a registered agent. Each user can only have one agent.",
+            )
+
+    personality = req.personality
+    description = req.description
+    name = req.name.strip() if req.name else ""
+    sprite_name = req.sprite_name
+
+    # --- persona generation via LLM ---
+    generated_persona: dict[str, Any] | None = None
+    if req.generate_persona:
+        from vvalley_core.llm.providers import generate_persona as gen_persona
+
+        logger.info("[AGENTS] Generating persona via LLM for name='%s'", name or "<auto>")
+        try:
+            generated_persona = gen_persona(name=name or None)
+            # Use LLM-generated name if user didn't provide one
+            if not name:
+                first = generated_persona.get("first_name", "Unknown")
+                last = generated_persona.get("last_name", "Resident")
+                name = f"{first} {last}"
+            personality = generated_persona
+            description = generated_persona.get("learned", description)
+        except Exception as e:
+            logger.warning("[AGENTS] Persona generation failed, continuing with defaults: %s", e)
+
+    # Fall back to a default name if still empty
+    if not name:
+        name = "Agent"
+
+    # Assign random sprite if not provided
+    if not sprite_name:
+        sprite_name = random.choice(CHARACTER_SPRITES)
+
+    logger.info("[AGENTS] Registering new agent: name='%s', owner_handle='%s', auto_claim=%s, sprite='%s'",
+                name, req.owner_handle, req.auto_claim, sprite_name)
+
     created = register_agent(
-        name=req.name.strip(),
-        description=req.description,
-        personality=req.personality,
+        name=name,
+        description=description,
+        personality=personality,
+        sprite_name=sprite_name,
     )
     logger.info("[AGENTS] Agent registered: id=%s, name='%s'", created["id"], created["name"])
 
@@ -141,6 +199,8 @@ def register_agent_endpoint(req: RegisterAgentRequest, request: Request) -> dict
             "claim_url": claim_url,
             "owner_handle": created.get("owner_handle"),
             "claimed_at": created.get("claimed_at"),
+            "sprite_name": sprite_name,
+            "persona": generated_persona,
         },
         "setup": _setup_info_payload(),
     }
@@ -306,6 +366,23 @@ def join_town(req: JoinTownRequest, authorization: Optional[str] = Header(defaul
                 detail=f"Town is full (max {MAX_AGENTS_PER_TOWN} agents): {town_id}",
             )
 
+    # --- ensure unique sprite in town ---
+    members = list_active_agents_in_town(town_id)
+    used_sprites = {
+        m.get("sprite_name") for m in members
+        if m.get("sprite_name") and str(m.get("agent_id")) != str(agent["id"])
+    }
+    agent_sprite = agent.get("sprite_name")
+    if agent_sprite in used_sprites:
+        # Pick an unused sprite
+        available = [s for s in CHARACTER_SPRITES if s not in used_sprites]
+        if available:
+            agent_sprite = random.choice(available)
+            update_agent_sprite(agent_id=str(agent["id"]), sprite_name=agent_sprite)
+            logger.info("[AGENTS] Reassigned sprite for agent %s to '%s' (original was taken)", agent["id"], agent_sprite)
+        else:
+            logger.warning("[AGENTS] All sprites taken in town '%s'", town_id)
+
     membership = join_agent_town(agent_id=agent["id"], town_id=town_id)
     if not membership:
         logger.error("[AGENTS] Join town failed - membership creation failed: agent_id=%s, town_id='%s'",
@@ -417,4 +494,13 @@ def leave_town(authorization: Optional[str] = Header(default=None)) -> dict[str,
             "claimed": bool(agent.get("claimed", False)),
             "current_town": None,
         },
+    }
+
+
+@router.get("/characters")
+def list_characters() -> dict[str, Any]:
+    """Return the 25 available character sprites."""
+    return {
+        "characters": CHARACTER_SPRITES,
+        "count": len(CHARACTER_SPRITES),
     }
