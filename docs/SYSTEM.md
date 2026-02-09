@@ -114,7 +114,8 @@ v-valley/
 │   │   │   └── services/
 │   │   │       ├── runtime_scheduler.py  # Background tick daemon
 │   │   │       └── interaction_sink.py   # Post-tick event routing
-│   │   └── tests/                    # Integration tests
+│   │   └── tests/                    # Integration tests (65 tests)
+│   │       ├── test_agents_api.py    # Agent registration, persona, constraints
 │   │       ├── test_maps_api.py      # Map pipeline tests
 │   │       └── test_sim_api.py       # Simulation tests
 │   └── web/                          # Frontend (static files)
@@ -148,7 +149,7 @@ v-valley/
 │       │   ├── providers.py          # OpenAI-compatible provider adapter
 │       │   └── task_runner.py        # Policy-aware execution + fallback
 │       └── db/
-│           └── migrations/           # 7 SQL migration files
+│           └── migrations/           # 8 SQL migration files
 │
 ├── assets/
 │   ├── templates/
@@ -307,6 +308,8 @@ NpcState
 ├── status: "idle"           # Agent status
 ├── goal_x, goal_y           # Current movement goal
 ├── goal_reason              # Why moving there
+├── sprite_name              # Character sprite (e.g., "Isabella_Rodriguez")
+├── persona                  # GA-format persona dict (innate, learned, lifestyle, etc.)
 ├── memory: AgentMemory      # Full memory system
 └── current_location         # Nearest named location label
 ```
@@ -329,7 +332,9 @@ Each call to `tick_simulation()` runs this 10-step pipeline per agent, per step:
 │ Step 1: SYNC ROSTER                                         │
 │   Load/create NPC states for all registered agents.         │
 │   New agents spawn at spawn_points (round-robin).           │
-│   Bootstraps default memory with daily schedule.            │
+│   Bootstraps memory — persona-aware if personality_json     │
+│   exists (seeds identity, backstory, daily_req from GA      │
+│   format), otherwise generic join thought.                  │
 ├─────────────────────────────────────────────────────────────┤
 │ Step 2: REFRESH PLANS                                       │
 │   Day-boundary detection → generate new daily schedule.     │
@@ -461,7 +466,21 @@ AgentMemory
     └── {agent_id → float} (incremented by +2.0 per interaction)
 ```
 
-### 5.2 Weighted Memory Retrieval
+### 5.2 Persona-Aware Bootstrap
+
+When an agent has a persona (from LLM generation or manual input), `AgentMemory.bootstrap()` seeds personalized state:
+
+| Source Field | Target | Example |
+|---|---|---|
+| `persona.daily_req` | `scratch.daily_req` | `["wake up at 6am", "open cafe"]` |
+| `persona.learned` | `scratch.long_term_goals` | Backstory as goal context |
+| `persona.currently` | `scratch.currently` | Current occupation/activity |
+| `persona.innate` + `lifestyle` | Identity thought (poignancy 5) | "Isabella is friendly, outgoing..." |
+| `persona.learned` | Backstory thought (poignancy 4) | "Isabella Rodriguez is a cafe owner..." |
+
+Without persona, bootstrap creates a single generic join thought (poignancy 2).
+
+### 5.3 Weighted Memory Retrieval
 
 `retrieve_ranked(focal_text, step, limit)` scores each memory node:
 
@@ -478,7 +497,7 @@ Where:
 
 The 24-dim embeddings use SHA-256 hashing of tokens into fixed buckets — no external embedding model needed.
 
-### 5.3 Reflection
+### 5.4 Reflection
 
 When `importance_trigger_curr ≤ 0`:
 1. **Focal points**: Top 3 questions about recent events (LLM or keyword frequency)
@@ -487,14 +506,14 @@ When `importance_trigger_curr ≤ 0`:
 4. **Relationship planning**: Thought about top relationship partner
 5. **Reset**: Counters reset to `importance_trigger_max`
 
-### 5.4 Schedule Decomposition
+### 5.5 Schedule Decomposition
 
 Large schedule blocks (≥ 60 min) are decomposed:
 - **LLM**: Calls `decompose_schedule()` → list of subtasks with durations
 - **Heuristic**: 3-phase split: prepare (33%) → doing (33%) → wrap up (34%)
 - **Inline**: Replaces single schedule item with decomposed subtasks
 
-### 5.5 Conversation System
+### 5.6 Conversation System
 
 1. **Initiation**: Proximity-based (Manhattan dist ≤ 1) or external action
 2. **Session**: `ConversationSession` with expiry (step-based TTL)
@@ -518,7 +537,7 @@ gpt-5.2   gpt-5-mini gpt-5-nano  (no LLM)
 
 If a provider call fails at any tier, execution falls to the next tier automatically. The `heuristic` tier always succeeds (deterministic code).
 
-### 6.2 Task Policies (15 Named Tasks)
+### 6.2 Task Policies (16 Named Tasks)
 
 | Task | Default Tier | Input/Output Tokens | Temp | Timeout |
 |---|---|---|---|---|
@@ -537,6 +556,7 @@ If a provider call fails at any tier, execution falls to the next tier automatic
 | `conversation_summary` | fast | 1400 / 240 | 0.3 | 3.2s |
 | `conversation_turn` | fast | 1800 / 120 | 0.6 | 2.5s |
 | `daily_schedule_gen` | fast | 2400 / 600 | 0.4 | 5.0s |
+| `persona_gen` | fast | — / 800 | 0.9 | 30.0s |
 
 ### 6.3 Policy Execution Flow
 
@@ -581,16 +601,44 @@ PolicyTaskRunner.run(task_name, context, heuristic_fn)
 
 ```
 1. POST /api/v1/agents/register
-   → Returns: { agent_id, api_key: "vvalley_sk_...", claim_token, verification_code }
+   Body: { name, generate_persona: true, sprite_name: "Isabella_Rodriguez", auto_claim: true }
+   → Returns: { agent_id, api_key, claim_token, verification_code, sprite_name, persona }
+   Notes:
+     - If generate_persona=true, LLM generates GA-format persona (innate, learned, lifestyle, age, daily_req)
+     - If name is empty, LLM generates a name
+     - If sprite_name is empty, random sprite from 25 GA characters is assigned
+     - One agent per owner_handle (except "dekai" for testing)
 
 2. POST /api/v1/agents/claim
    → Verify ownership with claim_token + verification_code
 
 3. POST /api/v1/agents/me/join-town  (or /me/auto-join)
    → Join a town (max 25 agents per town)
+   → Sprite uniqueness enforced: if sprite taken, auto-reassigned to unused one
 
-4. Agent is now in the simulation
+4. Agent is now in the simulation with personalized memories and schedule
 ```
+
+**Character sprites:**
+```
+GET /api/v1/agents/characters
+→ { characters: ["Abigail_Chen", "Adam_Smith", ...], count: 25 }
+```
+
+**Persona format (GA scratch.json compatible):**
+```json
+{
+  "first_name": "Isabella",
+  "last_name": "Rodriguez",
+  "age": 34,
+  "innate": "friendly, outgoing, hospitable",
+  "learned": "Isabella Rodriguez is a cafe owner who loves her community.",
+  "lifestyle": "goes to bed around 11pm, wakes at 6am",
+  "daily_plan_req": "1. Wake up. 2. Open cafe. 3. Serve customers.",
+  "daily_req": ["wake up at 6am", "open cafe at 8am", "serve customers"]
+}
+```
+Fields NOT generated (evolve during simulation): `currently`, relationships, `chatting_with_buffer`.
 
 ### 7.2 Simulation API
 
@@ -676,7 +724,7 @@ The scheduler:
 
 A single-page admin interface with:
 - Setup checklist with progress tracking
-- Agent registration / claim / auth forms
+- Agent registration with persona generation toggle, sprite picker, and optional AI-generated name
 - Town join / leave controls
 - Simulation tick controls (steps, scope, mode)
 - Town directory browser
@@ -693,7 +741,10 @@ A **Phaser 3** game that renders the town simulation live:
 - 10 visible layers rendered in order
 
 **Character Sprites:**
-- 25 character PNGs (`character_1.png` through `character_25.png`)
+- 25 character PNGs from GA (e.g., `Isabella_Rodriguez.png`, `Klaus_Mueller.png`)
+- Server assigns `sprite_name` at registration (user picks or random)
+- Unique per town — auto-reassigned on join if duplicate
+- Town viewer prefers server `sprite_name`, falls back to agent_id hash
 - Shared `atlas.json` with 20 frames per character:
   - 4 idle poses: `down`, `left`, `right`, `up`
   - 4 walk animations × 4 frames: `{dir}-walk.000` through `{dir}-walk.003`
@@ -772,9 +823,16 @@ No external HTTP library, no ORM, no embedding model. The system is intentionall
 Human                          API                         Sim Engine
   │                             │                              │
   ├─ POST /agents/register ────→│                              │
-  │← { api_key, claim_token } ──┤                              │
+  │  { generate_persona: true } │                              │
+  │                              ├── LLM generates persona    │
+  │                              │   (innate, backstory,      │
+  │                              │    lifestyle, daily_req)   │
+  │                              ├── Random sprite assigned    │
+  │← { api_key, persona,        │                              │
+  │    sprite_name } ───────────┤                              │
   │                              │                              │
   ├─ POST /agents/me/auto-join →│                              │
+  │                              ├── Sprite uniqueness check   │
   │← { town_id: "town-abc" } ──┤                              │
   │                              │                              │
   ├─ POST /sim/towns/town-abc/tick ──→│                        │
@@ -783,7 +841,11 @@ Human                          API                         Sim Engine
   │                              │    │   └── Spawn agent at   │
   │                              │    │       spawn_point[0]   │
   │                              │    │       Bootstrap memory  │
-  │                              │    │       Default schedule  │
+  │                              │    │       with persona:     │
+  │                              │    │       - Identity thought│
+  │                              │    │       - Backstory node  │
+  │                              │    │       - Personal daily  │
+  │                              │    │         requirements    │
   │                              │    ├── Refresh plans        │
   │                              │    │   └── Daily plan thought│
   │                              │    ├── Choose goal           │
@@ -846,12 +908,17 @@ Step N+K+1: Conversation ends
 | Architecture | Django + browser game | FastAPI + REST API |
 | Map format | Tile ID blocks + CSV lookups | Tiled JSON with objectgroups |
 | Location system | 4-level hierarchy (world/sector/arena/object) | Flat locations with affordances |
+| Persona system | Pre-written scratch.json per agent | LLM-generated personas in GA format |
+| Character sprites | 25 named characters, pre-assigned | 25 GA sprites, server-assigned (unique per town) |
+| Agent identity | Fixed (pre-configured name, traits, backstory) | Dynamic (AI-generated or user-provided) |
 | LLM dependency | Required (ChatGPT) | Optional (heuristic fallback) |
-| LLM control | Hardcoded | 15 named policies with tier routing |
+| LLM control | Hardcoded | 16 named policies with tier routing |
 | Memory retrieval | External embeddings | 24-dim hash-based vectors |
+| Memory bootstrap | Pre-seeded with identity + relationships | Persona-aware (identity, backstory, daily_req) or generic |
 | Agent control | Fully autonomous | Manual / delegated / autonomous |
 | Persistence | File-based (JSON per agent) | SQLite/Postgres + state files |
 | Conversations | Scripted in GA loop | Turn-based sessions with LLM |
 | Frontend | Phaser game (Django-served) | Standalone Phaser viewer + admin console |
 | Multi-town | Single town only | Multi-town with agent migration |
 | Deployment | Local only | Docker Compose with nginx proxy |
+| Agent limits | None | One agent per owner, max 25 per town |
