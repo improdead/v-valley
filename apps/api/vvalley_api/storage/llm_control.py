@@ -9,6 +9,7 @@ from typing import Any, Optional
 import logging
 import os
 import sqlite3
+import threading
 
 from packages.vvalley_core.llm.policy import (
     DEFAULT_TASK_POLICIES,
@@ -52,14 +53,25 @@ class LlmControlStore(ABC):
 class SQLiteLlmControlStore(LlmControlStore):
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
+        self._initialized = False
+        self._local = threading.local()
 
     def _connect(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            return conn
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        self._local.conn = conn
         return conn
 
     def init_db(self) -> None:
+        if self._initialized:
+            return
         with self._connect() as conn:
             conn.execute(
                 """
@@ -100,6 +112,7 @@ class SQLiteLlmControlStore(LlmControlStore):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_llm_logs_town_created ON llm_call_logs(town_id, created_at DESC)"
             )
+        self._initialized = True
 
     def upsert_policy(self, policy: TaskPolicy) -> TaskPolicy:
         self.init_db()

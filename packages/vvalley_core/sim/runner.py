@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,8 @@ from typing import Any, Callable, Optional
 
 from packages.vvalley_core.maps.map_utils import collision_grid, parse_location_objects, parse_spawns
 from packages.vvalley_core.sim.memory import AgentMemory
+
+logger = logging.getLogger("vvalley_core.sim.runner")
 
 
 def _utc_now() -> str:
@@ -149,6 +152,8 @@ class NpcState:
             "memory_summary": self.memory.summary(),
             "sprite_name": self.sprite_name,
             "persona": self.persona,
+            "pronunciatio": self.memory.scratch.act_pronunciatio,
+            "act_event": list(self.memory.scratch.act_event) if self.memory.scratch.act_event else None,
         }
 
 
@@ -248,6 +253,8 @@ class TownRuntime:
     conversation_sessions: dict[str, ConversationSession] = field(default_factory=dict)
     agent_conversations: dict[str, str] = field(default_factory=dict)
     autonomy_tick_counts: dict[str, int] = field(default_factory=dict)
+    spatial_metadata: Any = None  # TileSpatialMetadata | None — GA spatial grounding
+    object_states: dict[str, str] = field(default_factory=dict)  # "sector:arena:object" → state description
 
     def clock_snapshot(self, *, step: int | None = None) -> dict[str, Any]:
         current_step = max(0, int(self.step if step is None else step))
@@ -541,7 +548,10 @@ class SimulationRunner:
 
         chosen = sorted(candidates, key=score)[0]
         reason = schedule_item.description if schedule_item else normalized_scope
-        return (chosen.x, chosen.y, str(reason), target_affordance)
+        final_x, final_y = self._avoid_occupied_tile(
+            town=town, npc=npc, target=(chosen.x, chosen.y)
+        )
+        return (final_x, final_y, str(reason), target_affordance)
 
     def _goal_from_relationship(
         self,
@@ -608,6 +618,13 @@ class SimulationRunner:
         speakers = [a, b]
         clock = self._clock_for_runtime(town=town)
 
+        # Resolve spatial context for conversation location
+        _conv_sector: str | None = None
+        _conv_arena: str | None = None
+        if town.spatial_metadata is not None:
+            _conv_sector = town.spatial_metadata.sector_at(a.x, a.y)
+            _conv_arena = town.spatial_metadata.arena_at(a.x, a.y)
+
         for turn in range(max_turns):
             current = speakers[turn % 2]
             partner = speakers[(turn + 1) % 2]
@@ -625,8 +642,10 @@ class SimulationRunner:
             result = cognition.generate_conversation_turn({
                 "speaking_agent_name": current.name,
                 "speaking_agent_id": current.agent_id,
+                "speaking_agent_identity": current.memory.scratch.get_str_iss(),
                 "partner_name": partner.name,
                 "partner_id": partner.agent_id,
+                "partner_identity": partner.memory.scratch.get_str_iss(),
                 "speaking_agent_activity": current.memory.scratch.act_description or "their routine",
                 "partner_activity": partner.memory.scratch.act_description or "their routine",
                 "speaking_agent_memories": memories,
@@ -636,6 +655,8 @@ class SimulationRunner:
                 "transcript_so_far": transcript_so_far,
                 "turn_number": turn,
                 "time_of_day": str(clock.get("phase", "day")),
+                "location_sector": _conv_sector,
+                "location_arena": _conv_arena,
                 "town_id": town.town_id,
                 "step": step,
             })
@@ -676,15 +697,26 @@ class SimulationRunner:
             b_relationship = b.memory.relationship_scores.get(a.agent_id, 0.0)
             clock = self._clock_for_runtime(town=town)
 
+            # Resolve spatial context for conversation location
+            _ss_sector: str | None = None
+            _ss_arena: str | None = None
+            if town.spatial_metadata is not None:
+                _ss_sector = town.spatial_metadata.sector_at(a.x, a.y)
+                _ss_arena = town.spatial_metadata.arena_at(a.x, a.y)
+
             result = cognition.generate_conversation({
                 "agent_a_name": a.name,
                 "agent_b_name": b.name,
+                "agent_a_identity": a.memory.scratch.get_str_iss(),
+                "agent_b_identity": b.memory.scratch.get_str_iss(),
                 "agent_a_activity": a.memory.scratch.act_description or "their routine",
                 "agent_b_activity": b.memory.scratch.act_description or "their routine",
                 "agent_a_memories": a_memories,
                 "agent_b_memories": b_memories,
                 "relationship_score": round((a_relationship + b_relationship) / 2.0, 2),
                 "time_of_day": str(clock.get("phase", "day")),
+                "location_sector": _ss_sector,
+                "location_arena": _ss_arena,
                 "town_id": town.town_id,
                 "step": step,
             })
@@ -801,6 +833,17 @@ class SimulationRunner:
                         return out
                     continue
                 message, transcript = self._generate_conversation_content(a=a, b=b, step=step, town=town)
+                # Recompose schedules for both participants after chat reaction
+                chat_duration = max(10, len(transcript) * 5) if transcript else 15
+                for participant in (a, b):
+                    part_cognition = getattr(participant.memory, "cognition", None)
+                    if part_cognition is not None:
+                        self._recompose_schedule_on_reaction(
+                            town=town, npc=participant,
+                            inserted_activity=f"chatting with {a.name if participant is b else b.name}",
+                            inserted_duration_mins=chat_duration,
+                            cognition=part_cognition,
+                        )
                 out.append(
                     {
                         "step": step,
@@ -845,6 +888,15 @@ class SimulationRunner:
             MapLocationPoint(name=loc.name, x=loc.x, y=loc.y, affordances=loc.affordances)
             for loc in parse_location_objects(map_data)
         ]
+
+        # Build GA spatial metadata if available
+        spatial_meta = None
+        try:
+            from packages.vvalley_core.maps.map_utils import build_spatial_metadata
+            spatial_meta = build_spatial_metadata(map_data)
+        except Exception:
+            pass
+
         return TownRuntime(
             town_id=town_id,
             map_version_id=str(active_version["id"]),
@@ -855,6 +907,7 @@ class SimulationRunner:
             walkable=walkable,
             spawn_points=spawn_points,
             location_points=location_points,
+            spatial_metadata=spatial_meta,
         )
 
     @staticmethod
@@ -1184,8 +1237,13 @@ class SimulationRunner:
                 map_version_id=runtime.map_version_id,
                 payload=self._serialize_runtime(runtime),
             )
-        except Exception:
-            return
+        except Exception as exc:
+            logger.error(
+                "[RUNNER] Failed to persist runtime state for town '%s': %s",
+                runtime.town_id,
+                exc,
+            )
+            self._persist_error_count = getattr(self, "_persist_error_count", 0) + 1
 
     def _load_persisted_runtime(
         self,
@@ -1244,11 +1302,18 @@ class SimulationRunner:
 
     def _perceive_nearby_agents(self, *, town: TownRuntime, npc: NpcState, step: int) -> dict[str, Any]:
         candidates: list[tuple[int, NpcState]] = []
+        spatial = town.spatial_metadata
+        npc_arena = spatial.arena_at(npc.x, npc.y) if spatial else None
         for other in town.npcs.values():
             if other.agent_id == npc.agent_id:
                 continue
             dist = self._manhattan(npc.x, npc.y, other.x, other.y)
             if dist <= npc.memory.vision_radius:
+                # Arena-boundary filter: skip agents in a different arena
+                if spatial is not None and npc_arena is not None:
+                    other_arena = spatial.arena_at(other.x, other.y)
+                    if other_arena is not None and other_arena != npc_arena:
+                        continue
                 candidates.append((dist, other))
 
         candidates.sort(key=lambda item: (item[0], item[1].agent_id))
@@ -1257,6 +1322,13 @@ class SimulationRunner:
         new_events: list[str] = []
 
         for dist, other in candidates[: npc.memory.attention_bandwidth]:
+            # Use event triple from pronunciatio if available
+            evt = other.memory.scratch.act_event if other.memory.scratch.act_event else None
+            if evt and len(evt) == 3:
+                subj, pred, obj = evt
+            else:
+                subj, pred, obj = other.name, "is", other.status
+
             nearby.append(
                 {
                     "agent_id": other.agent_id,
@@ -1265,20 +1337,22 @@ class SimulationRunner:
                     "distance": dist,
                     "x": other.x,
                     "y": other.y,
+                    "event_triple": [subj, pred, obj],
+                    "pronunciatio": other.memory.scratch.act_pronunciatio,
                 }
             )
-            signature = (other.name, "is", other.status)
+            signature = (subj, pred, obj)
             if signature in seen_signatures:
                 continue
             seen_signatures.add(signature)
-            desc = f"{other.name} is {other.status} near ({other.x},{other.y})."
+            desc = f"{subj} {pred} {obj} near ({other.x},{other.y})."
             poignancy = npc.memory.score_event_poignancy(description=desc, event_type="perception")
             npc.memory.add_node(
                 kind="event",
                 step=step,
-                subject=other.name,
-                predicate="is",
-                object=other.status,
+                subject=subj,
+                predicate=pred,
+                object=obj,
                 description=desc,
                 poignancy=poignancy,
                 evidence_ids=(),
@@ -1388,6 +1462,251 @@ class SimulationRunner:
             if until <= int(step):
                 npc.memory.scratch.chatting_with_buffer.pop(key, None)
 
+    def _perceive_spatial_tiles(self, *, town: TownRuntime, npc: NpcState, step: int) -> None:
+        """Populate the agent's spatial memory tree from nearby tiles with spatial metadata."""
+        spatial = town.spatial_metadata
+        if spatial is None:
+            return
+        radius = npc.memory.vision_radius
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                tx, ty = npc.x + dx, npc.y + dy
+                sector = spatial.sector_at(tx, ty)
+                if sector is None:
+                    continue
+                arena = spatial.arena_at(tx, ty) or ""
+                game_obj = spatial.object_at(tx, ty) or ""
+                npc.memory.spatial.observe(world="the Ville", sector=sector, arena=arena, game_object=game_obj)
+
+    def _avoid_occupied_tile(
+        self, *, town: TownRuntime, npc: NpcState, target: tuple[int, int]
+    ) -> tuple[int, int]:
+        """If the target tile is occupied by another agent, find a nearby unoccupied walkable tile."""
+        tx, ty = target
+        # Check if any other agent is on the target tile
+        occupied = False
+        for other in town.npcs.values():
+            if other.agent_id == npc.agent_id:
+                continue
+            if other.x == tx and other.y == ty:
+                occupied = True
+                break
+        if not occupied:
+            return target
+        # Search in a small radius for an unoccupied walkable tile
+        for radius in range(1, 4):
+            for dy in range(-radius, radius + 1):
+                for dx in range(-radius, radius + 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    nx, ny = tx + dx, ty + dy
+                    if ny < 0 or ny >= len(town.walkable) or nx < 0 or nx >= len(town.walkable[0]):
+                        continue
+                    if town.walkable[ny][nx] != 1:
+                        continue
+                    # Check not occupied by another agent
+                    tile_occupied = False
+                    for other in town.npcs.values():
+                        if other.agent_id == npc.agent_id:
+                            continue
+                        if other.x == nx and other.y == ny:
+                            tile_occupied = True
+                            break
+                    if not tile_occupied:
+                        return (nx, ny)
+        # Couldn't find unoccupied tile, return original
+        return target
+
+    def _resolve_action_address(
+        self, *, town: TownRuntime, npc: NpcState, action_desc: str, cognition: Any
+    ) -> tuple[int, int] | None:
+        """3-step action address resolution: pick sector→arena→object, return target tile."""
+        spatial = town.spatial_metadata
+        if spatial is None:
+            return None
+        if cognition is None or not hasattr(cognition, "resolve_action_address"):
+            return None
+
+        sectors = spatial.sectors_list()
+        if not sectors:
+            return None
+
+        try:
+            result = cognition.resolve_action_address({
+                "agent_id": npc.agent_id,
+                "agent_name": npc.name,
+                "town_id": town.town_id,
+                "action_description": action_desc,
+                "identity": npc.memory.scratch.get_str_iss(),
+                "living_area": npc.memory.scratch.living_area or "",
+                "available_sectors": sectors,
+                "spatial_memory": list(npc.memory.spatial.tree.keys())[:10],
+            })
+
+            target_sector = str(result.get("action_sector") or "")
+            if not target_sector or target_sector not in sectors:
+                return None
+
+            # Step 2: get arenas in the chosen sector
+            arenas = spatial.arenas_in_sector(target_sector)
+            target_arena = str(result.get("action_arena") or "")
+            if target_arena and target_arena not in arenas and arenas:
+                target_arena = arenas[0]
+            elif not target_arena and arenas:
+                target_arena = arenas[0]
+
+            # Step 3: get objects in the chosen arena
+            if target_arena:
+                objects = spatial.objects_in_arena(target_sector, target_arena)
+                target_obj = str(result.get("action_game_object") or "")
+                if target_obj and target_obj in objects:
+                    tile = spatial.find_tile_for_object(target_sector, target_arena, target_obj)
+                    if tile:
+                        npc.memory.scratch.act_address = f"{target_sector}:{target_arena}:{target_obj}"
+                        return self._avoid_occupied_tile(town=town, npc=npc, target=tile)
+
+            # Fallback: find any walkable tile in the target sector
+            for y in range(spatial.height):
+                for x in range(spatial.width):
+                    if spatial.sector_at(x, y) == target_sector:
+                        if 0 <= y < len(town.walkable) and 0 <= x < len(town.walkable[0]):
+                            if town.walkable[y][x] == 1:
+                                npc.memory.scratch.act_address = target_sector
+                                return self._avoid_occupied_tile(town=town, npc=npc, target=(x, y))
+        except Exception:
+            pass
+        return None
+
+    def _update_object_state(
+        self, *, town: TownRuntime, npc: NpcState, cognition: Any
+    ) -> None:
+        """Update game object state when agent is on an object tile."""
+        spatial = town.spatial_metadata
+        if spatial is None:
+            return
+        obj = spatial.object_at(npc.x, npc.y)
+        if obj is None:
+            return
+        sector = spatial.sector_at(npc.x, npc.y) or ""
+        arena = spatial.arena_at(npc.x, npc.y) or ""
+        obj_key = f"{sector}:{arena}:{obj}"
+        action_desc = npc.status or "idle"
+
+        if cognition is not None and hasattr(cognition, "generate_object_state"):
+            try:
+                result = cognition.generate_object_state({
+                    "agent_id": npc.agent_id,
+                    "agent_name": npc.name,
+                    "town_id": town.town_id,
+                    "action_description": action_desc,
+                    "game_object": obj,
+                    "sector": sector,
+                    "arena": arena,
+                })
+                desc = str(result.get("object_description") or "").strip()
+                if desc and result.get("route") != "heuristic":
+                    town.object_states[obj_key] = desc
+                    return
+            except Exception:
+                pass
+
+        # Heuristic fallback
+        town.object_states[obj_key] = f"{obj} is being used by {npc.name}"
+
+    def _choose_perceived_event(
+        self, *, npc: NpcState, events: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        """GA-style event prioritization: pick the most relevant perceived event to react to.
+
+        Prioritize person events, skip self-events, skip idle.
+        """
+        if not events:
+            return None
+        # Filter out self-events and idle
+        candidates = []
+        for evt in events:
+            subj = str(evt.get("name") or "")
+            if subj == npc.name:
+                continue
+            desc = str(evt.get("status") or "").lower()
+            if "idle" in desc:
+                continue
+            candidates.append(evt)
+        if not candidates:
+            return None
+        # Prioritize agents (non-object events) over everything else
+        person_events = [e for e in candidates if ":" not in str(e.get("name") or "")]
+        if person_events:
+            return person_events[0]
+        return candidates[0]
+
+    def _maybe_react_to_event(
+        self, *, town: TownRuntime, npc: NpcState, event: dict[str, Any],
+        step: int, cognition: Any
+    ) -> str | None:
+        """Check if agent should react to a perceived event (non-chat). Returns new action or None."""
+        if cognition is None or not hasattr(cognition, "decide_to_react"):
+            return None
+        try:
+            event_desc = f"{event.get('name', 'someone')} is {event.get('status', 'doing something')}"
+            result = cognition.decide_to_react({
+                "agent_id": npc.agent_id,
+                "agent_name": npc.name,
+                "town_id": town.town_id,
+                "identity": npc.memory.scratch.get_str_iss(),
+                "agent_activity": npc.status or "idle",
+                "event_description": event_desc,
+                "step": step,
+            })
+            if result.get("route") == "heuristic" and not result.get("react"):
+                return None
+            if result.get("react"):
+                return str(result.get("new_action") or event_desc)
+        except Exception:
+            pass
+        return None
+
+    def _recompose_schedule_on_reaction(
+        self,
+        *,
+        town: TownRuntime,
+        npc: NpcState,
+        inserted_activity: str,
+        inserted_duration_mins: int,
+        cognition: Any,
+    ) -> bool:
+        """Recompose the daily schedule after a reaction/chat interruption (GA _create_react)."""
+        if cognition is None or not hasattr(cognition, "recompose_schedule"):
+            return False
+        schedule = npc.memory.scratch.daily_schedule
+        if not schedule:
+            return False
+        step_minutes = max(1, int(town.step_minutes))
+        current_minute = (int(town.step) * step_minutes) % max(1, npc.memory.scratch.day_minutes)
+        try:
+            from packages.vvalley_core.sim.memory import ScheduleItem
+            result = cognition.recompose_schedule({
+                "agent_id": npc.agent_id,
+                "agent_name": npc.name,
+                "town_id": town.town_id,
+                "identity": npc.memory.scratch.get_str_iss(),
+                "inserted_activity": inserted_activity,
+                "inserted_duration_mins": inserted_duration_mins,
+                "current_minute_of_day": current_minute,
+                "current_schedule": [item.as_dict() for item in schedule],
+                "step": town.step,
+            })
+            new_items = result.get("schedule") or []
+            if not new_items:
+                return False
+            new_schedule = [ScheduleItem.from_dict(item) for item in new_items if isinstance(item, dict)]
+            if new_schedule:
+                npc.memory.scratch.daily_schedule = new_schedule
+                return True
+        except Exception:
+            pass
+        return False
+
     def _schedule_remaining_minutes(self, *, town: TownRuntime, npc: NpcState) -> int:
         schedule_item, _, schedule_offset = npc.memory.scratch.current_schedule_state(
             step=town.step,
@@ -1466,6 +1785,46 @@ class SimulationRunner:
             self._relationship_score(source=a, target=b) + self._relationship_score(source=b, target=a)
         ) / 2.0
         relationship = max(0.0, relationship)
+
+        # --- Try LLM-based reaction policy first ---
+        cognition = getattr(a.memory, "cognition", None)
+        if cognition is not None and hasattr(cognition, "decide_to_talk"):
+            try:
+                llm_result = cognition.decide_to_talk({
+                    "agent_a_id": a.agent_id,
+                    "agent_b_id": b.agent_id,
+                    "agent_a_name": a.name,
+                    "agent_b_name": b.name,
+                    "agent_a_identity": a.memory.scratch.get_str_iss(),
+                    "agent_b_identity": b.memory.scratch.get_str_iss(),
+                    "agent_a_activity": a.status,
+                    "agent_b_activity": b.status,
+                    "relationship_score": relationship,
+                    "step": step,
+                    "town_id": town.town_id,
+                    "agent_id": a.agent_id,
+                })
+                if llm_result.get("route") != "heuristic":
+                    decision = str(llm_result.get("decision") or "ignore")
+                    if decision in ("talk", "wait", "ignore"):
+                        result: dict[str, Any] = {
+                            "decision": decision,
+                            "reason": str(llm_result.get("reason") or "llm_reaction_policy"),
+                            "relationship_score": round(relationship, 3),
+                            "policy_source": "llm",
+                        }
+                        if decision == "wait":
+                            a_busy = a_remaining <= b_remaining
+                            waiter = b if a_busy else a
+                            target = a if waiter.agent_id == b.agent_id else b
+                            result["waiter_agent_id"] = waiter.agent_id
+                            result["target_agent_id"] = target.agent_id
+                            result["wait_steps"] = max(1, int(llm_result.get("wait_steps") or (2 if relationship >= 2.0 else 1)))
+                        return result
+            except Exception:
+                pass
+
+        # --- Fallback: hash-based reaction policy ---
         urgency_penalty = 0
         if a_remaining <= 20:
             urgency_penalty += 10
@@ -1489,6 +1848,7 @@ class SimulationRunner:
                 "talk_threshold": talk_threshold,
                 "wait_threshold": wait_threshold,
                 "relationship_score": round(relationship, 3),
+                "policy_source": "heuristic",
             }
 
         if gate < wait_threshold:
@@ -1503,6 +1863,7 @@ class SimulationRunner:
                     "talk_threshold": talk_threshold,
                     "wait_threshold": wait_threshold,
                     "relationship_score": round(relationship, 3),
+                    "policy_source": "heuristic",
                 }
             wait_steps = 2 if relationship >= 2.0 else 1
             return {
@@ -1515,6 +1876,7 @@ class SimulationRunner:
                 "waiter_agent_id": waiter.agent_id,
                 "target_agent_id": target.agent_id,
                 "wait_steps": int(wait_steps),
+                "policy_source": "heuristic",
             }
 
         return {
@@ -1524,6 +1886,7 @@ class SimulationRunner:
             "talk_threshold": talk_threshold,
             "wait_threshold": wait_threshold,
             "relationship_score": round(relationship, 3),
+            "policy_source": "heuristic",
         }
 
     def _conversation_session_id(self, *, agent_a: str, agent_b: str) -> str:
@@ -1553,7 +1916,7 @@ class SimulationRunner:
             partner_id = session.partner_for(participant)
             partner = town.npcs.get(partner_id) if partner_id else None
             partner_name = partner.name if partner is not None else str(partner_id or "someone")
-            npc.memory.scratch.chatting_with_buffer[partner_name] = int(closed_step) + 4
+            npc.memory.scratch.chatting_with_buffer[partner_name] = int(closed_step) + 20
             # Conversation summary is handled by memory._conversation_follow_up_thought()
             # which fires on the next tick when chatting_end_step is reached, producing
             # memo + planning thought nodes and clearing scratch chat state.
@@ -1920,6 +2283,16 @@ class SimulationRunner:
                 "remaining_mins": max(0, duration - elapsed),
             }
 
+        # Spatial context from GA tile metadata
+        location_sector: str | None = None
+        location_arena: str | None = None
+        location_object: str | None = None
+        spatial = town.spatial_metadata
+        if spatial is not None:
+            location_sector = spatial.sector_at(npc.x, npc.y)
+            location_arena = spatial.arena_at(npc.x, npc.y)
+            location_object = spatial.object_at(npc.x, npc.y)
+
         return {
             "town_id": town.town_id,
             "step": town.step,
@@ -1927,6 +2300,7 @@ class SimulationRunner:
             "agent_id": npc.agent_id,
             "agent_name": npc.name,
             "persona": npc.persona,
+            "identity": npc.memory.scratch.get_str_iss(),
             "planning_scope": planning_scope,
             "position": {"x": npc.x, "y": npc.y},
             "map": {"width": town.width, "height": town.height},
@@ -1942,6 +2316,9 @@ class SimulationRunner:
                 "retrieved": retrieved,
             },
             "schedule": schedule,
+            "location_sector": location_sector,
+            "location_arena": location_arena,
+            "location_object": location_object,
         }
 
     def _conversation_context_for_agent(self, *, town: TownRuntime, npc: NpcState) -> dict[str, Any] | None:
@@ -1954,6 +2331,42 @@ class SimulationRunner:
         partner = town.npcs.get(partner_id)
         if partner is None:
             return None
+        # Add spatial location context for conversation
+        location_sector: str | None = None
+        location_arena: str | None = None
+        spatial = town.spatial_metadata
+        if spatial is not None:
+            location_sector = spatial.sector_at(npc.x, npc.y)
+            location_arena = spatial.arena_at(npc.x, npc.y)
+
+        # Generate relationship summary for conversation grounding
+        relationship_narrative: str | None = None
+        cognition = getattr(npc.memory, "cognition", None)
+        if cognition is not None and hasattr(cognition, "generate_relationship_summary") and int(session.turns) == 0:
+            try:
+                rel_score = (
+                    self._relationship_score(source=npc, target=partner)
+                    + self._relationship_score(source=partner, target=npc)
+                ) / 2.0
+                past = npc.memory.top_relationships(limit=10)
+                past_with_partner = [r for r in past if str(r.get("agent_id", "")) == partner.agent_id]
+                rel_result = cognition.generate_relationship_summary({
+                    "agent_id": npc.agent_id,
+                    "agent_name": npc.name,
+                    "town_id": town.town_id,
+                    "partner_name": partner.name,
+                    "identity": npc.memory.scratch.get_str_iss(),
+                    "partner_identity": partner.memory.scratch.get_str_iss(),
+                    "relationship_score": rel_score,
+                    "past_interactions": past_with_partner,
+                })
+                if rel_result.get("route") != "heuristic":
+                    relationship_narrative = str(rel_result.get("summary") or "").strip() or None
+                if relationship_narrative is None:
+                    relationship_narrative = str(rel_result.get("summary") or "").strip() or None
+            except Exception:
+                pass
+
         return {
             "session_id": session.session_id,
             "partner_agent_id": partner.agent_id,
@@ -1965,6 +2378,9 @@ class SimulationRunner:
             "expires_step": int(session.expires_step),
             "turns": int(session.turns),
             "last_message": session.last_message,
+            "location_sector": location_sector,
+            "location_arena": location_arena,
+            "relationship_summary": relationship_narrative,
         }
 
     def _normalize_pending_action(self, *, action: dict[str, Any], step: int) -> dict[str, Any]:
@@ -2360,7 +2776,6 @@ class SimulationRunner:
             npc.memory.set_position(x=npc.x, y=npc.y, step=runtime.step)
 
         runtime.updated_at = _utc_now()
-        self._persist_runtime(runtime)
         return runtime
 
     def get_state(
@@ -2529,6 +2944,7 @@ class SimulationRunner:
                 npc = runtime.npcs[agent_id]
                 self._prune_chat_buffer(npc=npc, step=runtime.step)
                 self._update_location_memory(town=runtime, npc=npc, step=runtime.step)
+                self._perceive_spatial_tiles(town=runtime, npc=npc, step=runtime.step)
 
                 submitted_action: dict[str, Any] | None = None
                 active_action: dict[str, Any] | None = runtime.active_actions.get(agent_id)
@@ -2700,13 +3116,25 @@ class SimulationRunner:
                             goal_x, goal_y, goal_reason, goal_affordance = location_goal
 
                     if planner:
+                        # Resolve spatial location for richer LLM context
+                        _planner_sector: str | None = None
+                        _planner_arena: str | None = None
+                        _planner_object: str | None = None
+                        if runtime.spatial_metadata is not None:
+                            _planner_sector = runtime.spatial_metadata.sector_at(from_x, from_y)
+                            _planner_arena = runtime.spatial_metadata.arena_at(from_x, from_y)
+                            _planner_object = runtime.spatial_metadata.object_at(from_x, from_y)
                         context = {
                             "town_id": town_id,
                             "step": runtime.step,
                             "agent_id": npc.agent_id,
                             "agent_name": npc.name,
+                            "identity": npc.memory.scratch.get_str_iss(),
                             "planning_scope": planning_scope,
                             "position": {"x": from_x, "y": from_y},
+                            "location_sector": _planner_sector,
+                            "location_arena": _planner_arena,
+                            "location_object": _planner_object,
                             "map": {"width": runtime.width, "height": runtime.height},
                             "goal_hint": {
                                 "x": goal_x,
@@ -3090,6 +3518,7 @@ class SimulationRunner:
                 npc.last_step = runtime.step
                 npc.status = "moving" if (from_x != to_x or from_y != to_y) else "idle"
                 self._update_location_memory(town=runtime, npc=npc, step=runtime.step)
+                self._perceive_spatial_tiles(town=runtime, npc=npc, step=runtime.step)
 
                 if external_action_description:
                     action_description = external_action_description
@@ -3131,6 +3560,76 @@ class SimulationRunner:
                     duration=10,
                     planned_path=[(goal_x, goal_y)] if goal_x is not None and goal_y is not None else [],
                 )
+
+                # --- Generate pronunciatio (emoji + event triple) ---
+                if cognition_planner is not None and hasattr(cognition_planner, "generate_pronunciatio") and not has_external_action:
+                    try:
+                        pron_result = cognition_planner.generate_pronunciatio({
+                            "agent_id": npc.agent_id,
+                            "agent_name": npc.name,
+                            "action_description": action_description,
+                            "identity": npc.memory.scratch.get_str_iss(),
+                            "town_id": runtime.town_id,
+                            "step": runtime.step,
+                        })
+                        npc.memory.scratch.act_pronunciatio = str(pron_result.get("emoji") or "💭")
+                        triple = pron_result.get("event_triple")
+                        if isinstance(triple, dict):
+                            npc.memory.scratch.act_event = (
+                                str(triple.get("subject") or npc.name),
+                                str(triple.get("predicate") or "is"),
+                                str(triple.get("object") or action_description),
+                            )
+                    except Exception:
+                        pass
+                if npc.memory.scratch.act_pronunciatio is None:
+                    from packages.vvalley_core.sim.cognition import _heuristic_pronunciatio
+                    fallback = _heuristic_pronunciatio({"action_description": action_description, "agent_name": npc.name})
+                    npc.memory.scratch.act_pronunciatio = str(fallback.get("emoji") or "💭")
+                    triple = fallback.get("event_triple") or {}
+                    npc.memory.scratch.act_event = (
+                        str(triple.get("subject") or npc.name),
+                        str(triple.get("predicate") or "is"),
+                        str(triple.get("object") or action_description),
+                    )
+
+                # --- Action address resolution (3-step: sector→arena→object) ---
+                if cognition_planner is not None and runtime.spatial_metadata is not None and not has_external_action:
+                    addr_tile = self._resolve_action_address(
+                        town=runtime, npc=npc,
+                        action_desc=action_description,
+                        cognition=cognition_planner,
+                    )
+                    if addr_tile is not None:
+                        # Override goal to the resolved object tile
+                        npc.goal_x, npc.goal_y = addr_tile
+
+                # --- Update object state if agent is on an object tile ---
+                self._update_object_state(
+                    town=runtime, npc=npc, cognition=None if has_external_action else cognition_planner,
+                )
+
+                # --- Event reaction: check if agent should react to perceived events ---
+                if cognition_planner is not None and not has_external_action:
+                    perception_result = self._perceive_nearby_agents_preview(town=runtime, npc=npc)
+                    chosen_event = self._choose_perceived_event(
+                        npc=npc, events=perception_result.get("nearby_agents", []),
+                    )
+                    if chosen_event is not None:
+                        new_action = self._maybe_react_to_event(
+                            town=runtime, npc=npc, event=chosen_event,
+                            step=runtime.step, cognition=cognition_planner,
+                        )
+                        if new_action is not None:
+                            npc.status = new_action
+                            npc.memory.scratch.act_address = None
+                            # Recompose schedule: splice the reaction into daily_schedule
+                            self._recompose_schedule_on_reaction(
+                                town=runtime, npc=npc,
+                                inserted_activity=new_action,
+                                inserted_duration_mins=30,
+                                cognition=cognition_planner,
+                            )
 
                 if from_x != to_x or from_y != to_y:
                     npc.memory.add_node(
@@ -3308,6 +3807,19 @@ class SimulationRunner:
 
 _RUNNER = SimulationRunner()
 _RUNNER_LOCK = threading.RLock()
+_LOCK_TIMEOUT = 5  # seconds — non-tick callers give up after this
+
+
+class SimulationBusyError(Exception):
+    """Raised when the simulation lock cannot be acquired within the timeout."""
+
+
+def _acquire_or_raise(timeout: float = _LOCK_TIMEOUT) -> None:
+    """Acquire _RUNNER_LOCK with a timeout; raise SimulationBusyError on failure."""
+    if not _RUNNER_LOCK.acquire(timeout=timeout):
+        raise SimulationBusyError(
+            "Simulation is busy (tick in progress). Retry shortly."
+        )
 
 
 def reset_simulation_states_for_tests(*, clear_persisted: bool = True) -> None:
@@ -3322,13 +3834,16 @@ def get_simulation_state(
     map_data: dict[str, Any],
     members: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    with _RUNNER_LOCK:
+    _acquire_or_raise()
+    try:
         return _RUNNER.get_state(
             town_id=town_id,
             active_version=active_version,
             map_data=map_data,
             members=members,
         )
+    finally:
+        _RUNNER_LOCK.release()
 
 
 def get_agent_memory_snapshot(
@@ -3340,7 +3855,8 @@ def get_agent_memory_snapshot(
     agent_id: str,
     limit: int = 40,
 ) -> dict[str, Any] | None:
-    with _RUNNER_LOCK:
+    _acquire_or_raise()
+    try:
         return _RUNNER.get_agent_memory(
             town_id=town_id,
             active_version=active_version,
@@ -3349,6 +3865,8 @@ def get_agent_memory_snapshot(
             agent_id=agent_id,
             limit=limit,
         )
+    finally:
+        _RUNNER_LOCK.release()
 
 
 def get_agent_context_snapshot(
@@ -3360,7 +3878,8 @@ def get_agent_context_snapshot(
     agent_id: str,
     planning_scope: str = "short_action",
 ) -> dict[str, Any] | None:
-    with _RUNNER_LOCK:
+    _acquire_or_raise()
+    try:
         return _RUNNER.get_agent_context(
             town_id=town_id,
             active_version=active_version,
@@ -3369,6 +3888,8 @@ def get_agent_context_snapshot(
             agent_id=agent_id,
             planning_scope=planning_scope,
         )
+    finally:
+        _RUNNER_LOCK.release()
 
 
 def submit_agent_action(
@@ -3380,7 +3901,8 @@ def submit_agent_action(
     agent_id: str,
     action: dict[str, Any],
 ) -> dict[str, Any] | None:
-    with _RUNNER_LOCK:
+    _acquire_or_raise()
+    try:
         return _RUNNER.submit_agent_action(
             town_id=town_id,
             active_version=active_version,
@@ -3389,6 +3911,8 @@ def submit_agent_action(
             agent_id=agent_id,
             action=action,
         )
+    finally:
+        _RUNNER_LOCK.release()
 
 
 def tick_simulation(

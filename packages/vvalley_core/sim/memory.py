@@ -244,6 +244,8 @@ class AgentScratch:
     act_duration: int | None = None
     act_description: str | None = None
     act_path_set: bool = False
+    act_pronunciatio: str | None = None
+    act_event: tuple[str, str, str] | None = None
     planned_path: list[tuple[int, int]] = field(default_factory=list)
 
     chatting_with: str | None = None
@@ -253,6 +255,16 @@ class AgentScratch:
 
     currently: str | None = None
     last_day_index: int = -1
+
+    # --- ISS (Identity Stable Set) fields ---
+    iss_name: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    age: int | None = None
+    innate: str | None = None
+    learned: str | None = None
+    lifestyle: str | None = None
+    living_area: str | None = None
 
     next_daily_plan_step: int = 0
     next_long_term_plan_step: int = 0
@@ -305,6 +317,25 @@ class AgentScratch:
         item, _, _ = self.current_schedule_state(step=step, step_minutes=step_minutes)
         return item
 
+    def get_str_iss(self) -> str:
+        """Return a formatted Identity Stable Set string for LLM prompt injection."""
+        parts: list[str] = []
+        display_name = self.iss_name or "Unknown"
+        parts.append(f"Name: {display_name}")
+        if self.age is not None:
+            parts.append(f"Age: {self.age}")
+        if self.innate:
+            parts.append(f"Innate traits: {self.innate}")
+        if self.learned:
+            parts.append(f"Background: {self.learned}")
+        if self.lifestyle:
+            parts.append(f"Lifestyle: {self.lifestyle}")
+        if self.living_area:
+            parts.append(f"Living area: {self.living_area}")
+        if self.currently:
+            parts.append(f"Currently: {self.currently}")
+        return "\n".join(parts)
+
     def as_dict(self) -> dict[str, object]:
         return {
             "vision_radius": int(self.vision_radius),
@@ -329,6 +360,8 @@ class AgentScratch:
             "act_duration": self.act_duration,
             "act_description": self.act_description,
             "act_path_set": bool(self.act_path_set),
+            "act_pronunciatio": self.act_pronunciatio,
+            "act_event": list(self.act_event) if self.act_event else None,
             "planned_path": [list(i) for i in self.planned_path],
             "chatting_with": self.chatting_with,
             "chat": [[speaker, utterance] for speaker, utterance in self.chat],
@@ -336,6 +369,14 @@ class AgentScratch:
             "chatting_end_step": self.chatting_end_step,
             "currently": self.currently,
             "last_day_index": int(self.last_day_index),
+            "iss_name": self.iss_name,
+            "first_name": self.first_name,
+            "last_name": self.last_name,
+            "age": self.age,
+            "innate": self.innate,
+            "learned": self.learned,
+            "lifestyle": self.lifestyle,
+            "living_area": self.living_area,
             "next_daily_plan_step": int(self.next_daily_plan_step),
             "next_long_term_plan_step": int(self.next_long_term_plan_step),
         }
@@ -365,10 +406,19 @@ class AgentScratch:
             act_duration=(int(raw["act_duration"]) if raw.get("act_duration") is not None else None),
             act_description=(str(raw.get("act_description")) if raw.get("act_description") is not None else None),
             act_path_set=bool(raw.get("act_path_set") or False),
+            act_pronunciatio=(str(raw.get("act_pronunciatio")) if raw.get("act_pronunciatio") is not None else None),
             chatting_with=(str(raw.get("chatting_with")) if raw.get("chatting_with") is not None else None),
             chatting_end_step=(int(raw["chatting_end_step"]) if raw.get("chatting_end_step") is not None else None),
             currently=(str(raw.get("currently")) if raw.get("currently") is not None else None),
             last_day_index=int(raw.get("last_day_index") or -1),
+            iss_name=(str(raw.get("iss_name")) if raw.get("iss_name") is not None else None),
+            first_name=(str(raw.get("first_name")) if raw.get("first_name") is not None else None),
+            last_name=(str(raw.get("last_name")) if raw.get("last_name") is not None else None),
+            age=(int(raw["age"]) if raw.get("age") is not None else None),
+            innate=(str(raw.get("innate")) if raw.get("innate") is not None else None),
+            learned=(str(raw.get("learned")) if raw.get("learned") is not None else None),
+            lifestyle=(str(raw.get("lifestyle")) if raw.get("lifestyle") is not None else None),
+            living_area=(str(raw.get("living_area")) if raw.get("living_area") is not None else None),
             next_daily_plan_step=max(0, int(raw.get("next_daily_plan_step") or 0)),
             next_long_term_plan_step=max(0, int(raw.get("next_long_term_plan_step") or 0)),
         )
@@ -378,6 +428,9 @@ class AgentScratch:
                 scratch.curr_tile = (int(curr_tile[0]), int(curr_tile[1]))
             except Exception:
                 scratch.curr_tile = None
+        act_event_raw = raw.get("act_event")
+        if isinstance(act_event_raw, (list, tuple)) and len(act_event_raw) == 3:
+            scratch.act_event = (str(act_event_raw[0]), str(act_event_raw[1]), str(act_event_raw[2]))
         daily_schedule_raw = raw.get("daily_schedule") or []
         scratch.daily_schedule = [ScheduleItem.from_dict(item) for item in daily_schedule_raw if isinstance(item, dict)]
         hourly_raw = raw.get("daily_schedule_hourly_original") or []
@@ -573,6 +626,21 @@ class AgentMemory:
             daily_req = persona.get("daily_req")
             currently = persona.get("currently")
 
+            # Populate ISS fields
+            p_first = str(persona.get("first_name", "")).strip()
+            p_last = str(persona.get("last_name", "")).strip()
+            memory.scratch.first_name = p_first or None
+            memory.scratch.last_name = p_last or None
+            memory.scratch.iss_name = f"{p_first} {p_last}".strip() or agent_name
+            try:
+                memory.scratch.age = int(persona["age"]) if persona.get("age") is not None else None
+            except (ValueError, TypeError):
+                memory.scratch.age = None
+            memory.scratch.innate = str(innate).strip() or None
+            memory.scratch.learned = str(learned).strip() or None
+            memory.scratch.lifestyle = str(lifestyle).strip() or None
+            memory.scratch.living_area = str(persona.get("living_area", "")).strip() or None
+
             if isinstance(daily_req, list) and daily_req:
                 memory.scratch.daily_req = [str(r) for r in daily_req if str(r).strip()]
 
@@ -648,17 +716,17 @@ class AgentMemory:
         lowered = [kw.lower() for kw in node.keywords]
         if node.kind == "event":
             for kw in lowered:
-                self.kw_to_event.setdefault(kw, []).insert(0, node.node_id)
+                self.kw_to_event.setdefault(kw, []).append(node.node_id)
                 if f"{node.predicate} {node.object}" != "is idle":
                     self.kw_strength_event[kw] = int(self.kw_strength_event.get(kw, 0)) + 1
         elif node.kind in {"thought", "reflection"}:
             for kw in lowered:
-                self.kw_to_thought.setdefault(kw, []).insert(0, node.node_id)
+                self.kw_to_thought.setdefault(kw, []).append(node.node_id)
                 if f"{node.predicate} {node.object}" != "is idle":
                     self.kw_strength_thought[kw] = int(self.kw_strength_thought.get(kw, 0)) + 1
         elif node.kind == "chat":
             for kw in lowered:
-                self.kw_to_chat.setdefault(kw, []).insert(0, node.node_id)
+                self.kw_to_chat.setdefault(kw, []).append(node.node_id)
 
     def add_node(
         self,
@@ -710,17 +778,17 @@ class AgentMemory:
             address=address,
             expiration_step=expiration_step,
         )
-        self.nodes.insert(0, node)
+        self.nodes.append(node)
         self.id_to_node[node.node_id] = node
         if node.kind == "event":
-            self.seq_event.insert(0, node.node_id)
+            self.seq_event.append(node.node_id)
         elif node.kind == "chat":
-            self.seq_chat.insert(0, node.node_id)
+            self.seq_chat.append(node.node_id)
         elif node.kind == "reflection":
-            self.seq_reflection.insert(0, node.node_id)
-            self.seq_thought.insert(0, node.node_id)
+            self.seq_reflection.append(node.node_id)
+            self.seq_thought.append(node.node_id)
         else:
-            self.seq_thought.insert(0, node.node_id)
+            self.seq_thought.append(node.node_id)
         self._index_node_keywords(node=node)
 
         if decrement_trigger:
@@ -730,7 +798,7 @@ class AgentMemory:
 
     def recent_signatures(self) -> set[tuple[str, str, str]]:
         signatures: set[tuple[str, str, str]] = set()
-        ordered = list(self.seq_event) + list(self.seq_chat)
+        ordered = list(reversed(self.seq_event)) + list(reversed(self.seq_chat))
         for node_id in ordered:
             node = self.id_to_node.get(node_id)
             if not node:
@@ -860,7 +928,7 @@ class AgentMemory:
                     object=affordance or "routine",
                     description=f"{self.agent_name} updates daily plan: {action_desc}.",
                     poignancy=3,
-                    evidence_ids=tuple(self.seq_event[:2]),
+                    evidence_ids=tuple(self.seq_event[-2:]),
                     decrement_trigger=False,
                     expiration_step=int(step) + (24 * 2),
                 )
@@ -882,7 +950,7 @@ class AgentMemory:
                     object=rel_target,
                     description=f"{self.agent_name} sets long-term focus around {rel_target} and {place_target}.",
                     poignancy=4,
-                    evidence_ids=tuple(self.seq_thought[:2]),
+                    evidence_ids=tuple(self.seq_thought[-2:]),
                     decrement_trigger=False,
                     expiration_step=int(step) + (24 * 7),
                 )
@@ -899,31 +967,83 @@ class AgentMemory:
             return created
 
         try:
+            # --- Detect first day (no previous schedule or very early step) ---
+            is_first_day = not self.scratch.daily_schedule or step <= 1
+
+            # --- Generate wake-up hour ---
+            wake_up_hour = 7  # default
+            if hasattr(self.cognition, "generate_wake_up_hour"):
+                try:
+                    wake_result = self.cognition.generate_wake_up_hour({
+                        "agent_id": self.agent_id,
+                        "agent_name": self.agent_name,
+                        "lifestyle": self.scratch.lifestyle or "",
+                        "identity": self.scratch.get_str_iss(),
+                        "town_id": self.town_id or "",
+                    })
+                    wake_up_hour = max(0, min(23, int(wake_result.get("wake_up_hour") or 7)))
+                except Exception:
+                    pass
+
             # Gather context for schedule generation
             recent_thoughts = [
-                node.description for node in self.nodes[:8]
+                node.description for node in self.nodes[-8:]
                 if node.kind in {"thought", "reflection"} and "idle" not in node.embedding_key.lower()
             ][:4]
             recent_events = [
-                node.description for node in self.nodes[:12]
+                node.description for node in self.nodes[-12:]
                 if node.kind == "event" and "idle" not in node.embedding_key.lower()
             ][:4]
             top_rels = self.top_relationships(limit=3)
             rel_names = [str(r.get("agent_id", "")) for r in top_rels]
 
-            result = self.cognition.generate_daily_schedule({
-                "agent_id": self.agent_id,
-                "agent_name": self.agent_name,
-                "town_id": self.town_id or "",
-                "daily_requirements": self.scratch.daily_req[:5],
-                "long_term_goals": self.scratch.long_term_goals[:3],
-                "recent_thoughts": recent_thoughts,
-                "recent_events": recent_events,
-                "known_places": list(self.known_places.keys())[:6],
-                "relationships": rel_names,
-                "previous_currently": self.scratch.currently or "",
-                "step": step,
-            })
+            # Retrieve plan-related memories for identity revision
+            plan_memories: list[str] = []
+            try:
+                plan_results = self.retrieve_ranked(
+                    focal_text=f"{self.agent_name} plan for today",
+                    step=step,
+                    limit=3,
+                )
+                for r in plan_results:
+                    nid = str(r.get("node_id", ""))
+                    node = self.id_to_node.get(nid)
+                    if node is not None:
+                        plan_memories.append(node.description)
+            except Exception:
+                pass
+
+            # --- First day: use exploratory plan; subsequent days: full schedule ---
+            if is_first_day and hasattr(self.cognition, "generate_first_daily_plan"):
+                result = self.cognition.generate_first_daily_plan({
+                    "agent_id": self.agent_id,
+                    "agent_name": self.agent_name,
+                    "town_id": self.town_id or "",
+                    "identity": self.scratch.get_str_iss(),
+                    "innate": self.scratch.innate or "",
+                    "learned": self.scratch.learned or "",
+                    "lifestyle": self.scratch.lifestyle or "",
+                    "living_area": self.scratch.living_area or "",
+                    "wake_up_hour": wake_up_hour,
+                    "step": step,
+                })
+            else:
+                result = self.cognition.generate_daily_schedule({
+                    "agent_id": self.agent_id,
+                    "agent_name": self.agent_name,
+                    "town_id": self.town_id or "",
+                    "identity": self.scratch.get_str_iss(),
+                    "daily_requirements": self.scratch.daily_req[:5],
+                    "long_term_goals": self.scratch.long_term_goals[:3],
+                    "recent_thoughts": recent_thoughts,
+                    "recent_events": recent_events,
+                    "plan_memories": plan_memories,
+                    "known_places": list(self.known_places.keys())[:6],
+                    "relationships": rel_names,
+                    "previous_currently": self.scratch.currently or "",
+                    "wake_up_hour": wake_up_hour,
+                    "step": step,
+                })
 
             if result.get("route") == "heuristic":
                 return created
@@ -940,6 +1060,13 @@ class AgentMemory:
                     dur = max(1, int(item.get("duration_mins") or 60))
                     new_schedule.append(ScheduleItem(desc, dur))
                     total += dur
+
+                # Prepend sleeping block based on wake-up hour
+                sleep_mins = wake_up_hour * 60
+                if sleep_mins > 0:
+                    new_schedule.insert(0, ScheduleItem("sleeping", sleep_mins))
+                    total += sleep_mins
+
                 # Accept if total is within 10% of day length
                 day_mins = self.scratch.day_minutes
                 if new_schedule and abs(total - day_mins) <= day_mins * 0.1:
@@ -960,11 +1087,16 @@ class AgentMemory:
                         object="self",
                         description=f"{self.agent_name}'s new focus: {currently}",
                         poignancy=5,
-                        evidence_ids=tuple(self.seq_thought[:2]),
+                        evidence_ids=tuple(self.seq_thought[-2:]),
                         decrement_trigger=False,
                         expiration_step=int(step) + (24 * 6),
                     )
                 )
+
+            # Update daily_req if LLM provides revised requirements
+            new_daily_req = result.get("daily_req")
+            if isinstance(new_daily_req, list) and new_daily_req:
+                self.scratch.daily_req = [str(r) for r in new_daily_req[:8]]
 
             created.append(
                 self.add_node(
@@ -1007,7 +1139,7 @@ class AgentMemory:
         self.relationship_scores[target_id] = float(self.relationship_scores.get(target_id, 0.0)) + 2.0
         self.scratch.chatting_with = target
         self.scratch.chatting_end_step = int(step) + 2
-        self.scratch.chatting_with_buffer[target] = int(step) + self.vision_radius
+        self.scratch.chatting_with_buffer[target] = int(step) + 20
         if transcript:
             for speaker, utterance in transcript:
                 self.scratch.chat.append((str(speaker), str(utterance)))
@@ -1145,7 +1277,7 @@ class AgentMemory:
     def _combined_nodes_for_retrieval(self) -> list[MemoryNode]:
         ordered_ids: list[str] = []
         seen: set[str] = set()
-        for node_id in list(self.seq_event) + list(self.seq_thought):
+        for node_id in list(reversed(self.seq_event)) + list(reversed(self.seq_thought)):
             if node_id in seen:
                 continue
             seen.add(node_id)
@@ -1209,7 +1341,7 @@ class AgentMemory:
         return out
 
     def _reflection_focal_points(self, *, step: int = 0) -> list[str]:
-        candidates = self.nodes[: max(8, min(32, len(self.nodes)))]
+        candidates = self.nodes[-max(8, min(32, len(self.nodes))):]
         if not candidates:
             return []
 
@@ -1254,7 +1386,7 @@ class AgentMemory:
         partner = self.scratch.chatting_with or "chat"
         convo_excerpt = " | ".join(f"{speaker}: {line}" for speaker, line in self.scratch.chat[-4:])
         created: list[MemoryNode] = []
-        chat_evidence = tuple(self.seq_chat[:2])
+        chat_evidence = tuple(self.seq_chat[-2:])
 
         # Try LLM-based conversation summary
         if self.cognition is not None:
@@ -1417,7 +1549,70 @@ class AgentMemory:
 
         follow_ups = self._conversation_follow_up_thought(step=step)
         out.extend(follow_ups)
+
+        # Prune expired and over-cap nodes
+        self.prune_expired(step=step)
+        self._evict_to_cap(step=step)
+
         return out
+
+    # ------------------------------------------------------------------
+    # Memory management: pruning and eviction
+    # ------------------------------------------------------------------
+
+    MAX_MEMORY_NODES = 2000
+
+    def prune_expired(self, *, step: int) -> int:
+        """Remove nodes past their expiration_step. Returns count removed."""
+        to_remove: set[str] = set()
+        for node in self.nodes:
+            if node.expiration_step is not None and node.expiration_step <= step:
+                to_remove.add(node.node_id)
+        if not to_remove:
+            return 0
+        return self._remove_nodes(to_remove)
+
+    def _evict_to_cap(self, *, step: int) -> int:
+        """If node count exceeds MAX_MEMORY_NODES, evict lowest-value nodes."""
+        if len(self.nodes) <= self.MAX_MEMORY_NODES:
+            return 0
+        excess = len(self.nodes) - self.MAX_MEMORY_NODES
+        # Build eviction candidates: never evict reflections or recent nodes
+        recent_cutoff = max(0, step - 100)
+        candidates: list[tuple[int, int, str]] = []
+        for node in self.nodes:
+            if node.kind == "reflection":
+                continue
+            if node.step >= recent_cutoff:
+                continue
+            candidates.append((node.poignancy, node.step, node.node_id))
+        # Sort by lowest poignancy first, then oldest step first
+        candidates.sort(key=lambda c: (c[0], c[1]))
+        to_remove: set[str] = set()
+        for _, _, node_id in candidates[:excess]:
+            to_remove.add(node_id)
+        if not to_remove:
+            return 0
+        return self._remove_nodes(to_remove)
+
+    def _remove_nodes(self, node_ids: set[str]) -> int:
+        """Remove a set of nodes from all data structures. Returns count removed."""
+        self.nodes = [n for n in self.nodes if n.node_id not in node_ids]
+        for nid in node_ids:
+            self.id_to_node.pop(nid, None)
+        self.seq_event = [nid for nid in self.seq_event if nid not in node_ids]
+        self.seq_thought = [nid for nid in self.seq_thought if nid not in node_ids]
+        self.seq_chat = [nid for nid in self.seq_chat if nid not in node_ids]
+        self.seq_reflection = [nid for nid in self.seq_reflection if nid not in node_ids]
+        # Rebuild keyword indices
+        self.kw_to_event = {}
+        self.kw_to_thought = {}
+        self.kw_to_chat = {}
+        self.kw_strength_event = {}
+        self.kw_strength_thought = {}
+        for node in self.nodes:
+            self._index_node_keywords(node=node)
+        return len(node_ids)
 
     def summary(self) -> dict[str, object]:
         event_count = len(self.seq_event)
@@ -1448,7 +1643,7 @@ class AgentMemory:
             },
             "spatial_memory": self.spatial.as_dict(),
             "scratch": self.scratch.as_dict(),
-            "nodes": [node.as_dict() for node in self.nodes[: max(1, int(limit))]],
+            "nodes": [node.as_dict() for node in self.nodes[-max(1, int(limit)):]],
         }
 
     def export_state(self) -> dict[str, object]:
@@ -1495,6 +1690,8 @@ class AgentMemory:
             except Exception:
                 continue
         memory.nodes = nodes
+        # Ensure oldest-first order (handles state files from before the ordering flip)
+        memory.nodes.sort(key=lambda n: int(n.step))
         memory.id_to_node = {node.node_id: node for node in memory.nodes}
         memory.seq_event = [node.node_id for node in memory.nodes if node.kind == "event"]
         memory.seq_chat = [node.node_id for node in memory.nodes if node.kind == "chat"]
@@ -1505,7 +1702,7 @@ class AgentMemory:
         memory.kw_to_chat = {}
         memory.kw_strength_event = {}
         memory.kw_strength_thought = {}
-        for node in reversed(memory.nodes):
+        for node in memory.nodes:
             memory._index_node_keywords(node=node)
         memory.scratch.ensure_default_schedule(agent_name=memory.agent_name)
         if memory.scratch.importance_trigger_curr > memory.scratch.importance_trigger_max:

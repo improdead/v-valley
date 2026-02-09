@@ -10,6 +10,7 @@ from typing import Any, Iterable, Optional
 from urllib.parse import urlparse
 import os
 import sqlite3
+import threading
 import uuid
 
 logger = getLogger("vvalley_api.storage.map_versions")
@@ -71,12 +72,20 @@ class MapVersionStore(ABC):
 class SQLiteMapVersionStore(MapVersionStore):
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
+        self._initialized = False
+        self._local = threading.local()
 
     def _connect(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            return conn
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        self._local.conn = conn
         return conn
 
     @staticmethod
@@ -84,6 +93,8 @@ class SQLiteMapVersionStore(MapVersionStore):
         return {k: row[k] for k in row.keys()}
 
     def init_db(self) -> None:
+        if self._initialized:
+            return
         logger.info("[STORAGE] Initializing SQLite map versions database at '%s'", self.db_path)
         with self._connect() as conn:
             conn.execute(
@@ -125,6 +136,7 @@ class SQLiteMapVersionStore(MapVersionStore):
                 "CREATE INDEX IF NOT EXISTS idx_tmv_town_version ON town_map_versions(town_id, version)"
             )
         logger.info("[STORAGE] SQLite map versions database initialized successfully")
+        self._initialized = True
 
     def next_version(self, town_id: str) -> int:
         self.init_db()

@@ -195,3 +195,178 @@ def validate_tile_layer_shape(layer: dict[str, Any], width: int, height: int) ->
             f"Layer '{layer.get('name')}' data length must be {width * height}"
         )
     return errors
+
+
+# ---------------------------------------------------------------------------
+# Per-tile spatial metadata (GA spatial grounding)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TileSpatialMetadata:
+    """Per-tile spatial metadata grids built from GA tile layers + embedded lookups.
+
+    Each grid is width×height and maps (x,y) to a name string or None.
+    """
+
+    width: int
+    height: int
+    tile_sectors: list[list[str | None]]   # [y][x] -> sector name or None
+    tile_arenas: list[list[str | None]]    # [y][x] -> arena name or None
+    tile_objects: list[list[str | None]]   # [y][x] -> game object name or None
+
+    def sector_at(self, x: int, y: int) -> str | None:
+        if 0 <= x < self.width and 0 <= y < self.height:
+            return self.tile_sectors[y][x]
+        return None
+
+    def arena_at(self, x: int, y: int) -> str | None:
+        if 0 <= x < self.width and 0 <= y < self.height:
+            return self.tile_arenas[y][x]
+        return None
+
+    def object_at(self, x: int, y: int) -> str | None:
+        if 0 <= x < self.width and 0 <= y < self.height:
+            return self.tile_objects[y][x]
+        return None
+
+    def full_address_at(self, x: int, y: int) -> tuple[str | None, str | None, str | None]:
+        """Return (sector, arena, object) for tile (x,y)."""
+        return (self.sector_at(x, y), self.arena_at(x, y), self.object_at(x, y))
+
+    def sectors_list(self) -> list[str]:
+        """Unique sector names present on the map."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for row in self.tile_sectors:
+            for v in row:
+                if v and v not in seen:
+                    seen.add(v)
+                    out.append(v)
+        return out
+
+    def arenas_in_sector(self, sector: str) -> list[str]:
+        """Unique arena names within a given sector."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for y in range(self.height):
+            for x in range(self.width):
+                if self.tile_sectors[y][x] == sector:
+                    arena = self.tile_arenas[y][x]
+                    if arena and arena not in seen:
+                        seen.add(arena)
+                        out.append(arena)
+        return out
+
+    def objects_in_arena(self, sector: str, arena: str) -> list[str]:
+        """Unique game object names within a given sector+arena."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for y in range(self.height):
+            for x in range(self.width):
+                if self.tile_sectors[y][x] == sector and self.tile_arenas[y][x] == arena:
+                    obj = self.tile_objects[y][x]
+                    if obj and obj not in seen:
+                        seen.add(obj)
+                        out.append(obj)
+        return out
+
+    def find_tile_for_object(
+        self, sector: str, arena: str, game_object: str
+    ) -> tuple[int, int] | None:
+        """Find any tile with the given sector+arena+object. Returns (x,y) or None."""
+        for y in range(self.height):
+            for x in range(self.width):
+                if (
+                    self.tile_sectors[y][x] == sector
+                    and self.tile_arenas[y][x] == arena
+                    and self.tile_objects[y][x] == game_object
+                ):
+                    return (x, y)
+        return None
+
+
+def build_spatial_metadata(map_data: dict[str, Any]) -> TileSpatialMetadata | None:
+    """Build per-tile spatial grids from GA tile layers + embedded lookup tables.
+
+    Returns None if the map doesn't have GA spatial layers or lookups.
+    """
+    width = int(map_data.get("width", 0))
+    height = int(map_data.get("height", 0))
+    if width <= 0 or height <= 0:
+        return None
+
+    # Extract embedded spatial_lookups
+    spatial_json = None
+    for prop in map_data.get("properties", []):
+        if prop.get("name") == "spatial_lookups":
+            spatial_json = prop.get("value")
+            break
+    if not spatial_json:
+        return None
+
+    try:
+        lookups = json.loads(spatial_json)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    sector_ids: dict[int, str] = {int(k): v for k, v in lookups.get("sector_ids", {}).items()}
+    arena_ids: dict[int, tuple[str, str]] = {}
+    for k, v in lookups.get("arena_ids", {}).items():
+        if isinstance(v, list) and len(v) == 2:
+            arena_ids[int(k)] = (str(v[0]), str(v[1]))
+    object_ids: dict[int, str] = {int(k): v for k, v in lookups.get("game_object_ids", {}).items()}
+
+    if not sector_ids:
+        return None
+
+    # Find GA spatial tile layers
+    sector_layer = get_layer(map_data, "Sector Blocks")
+    arena_layer = get_layer(map_data, "Arena Blocks")
+    object_layer = get_layer(map_data, "Object Interaction Blocks")
+
+    if not sector_layer:
+        return None
+
+    sector_data = sector_layer.get("data", [])
+    arena_data = arena_layer.get("data", []) if arena_layer else []
+    object_data = object_layer.get("data", []) if object_layer else []
+
+    # Build grids
+    tile_sectors: list[list[str | None]] = [[None] * width for _ in range(height)]
+    tile_arenas: list[list[str | None]] = [[None] * width for _ in range(height)]
+    tile_objects: list[list[str | None]] = [[None] * width for _ in range(height)]
+
+    for idx in range(min(len(sector_data), width * height)):
+        tid = int(sector_data[idx])
+        if tid != 0 and tid in sector_ids:
+            x = idx % width
+            y = idx // width
+            tile_sectors[y][x] = sector_ids[tid]
+
+    for idx in range(min(len(arena_data), width * height)):
+        tid = int(arena_data[idx])
+        if tid != 0 and tid in arena_ids:
+            x = idx % width
+            y = idx // width
+            sector_name, arena_name = arena_ids[tid]
+            tile_arenas[y][x] = arena_name
+            # Also fill in sector from arena if missing
+            if tile_sectors[y][x] is None:
+                tile_sectors[y][x] = sector_name
+
+    # For objects, the arena they belong to is determined by the tile's arena,
+    # so objects inherit sector/arena from overlapping arena tiles
+    for idx in range(min(len(object_data), width * height)):
+        tid = int(object_data[idx])
+        if tid != 0 and tid in object_ids:
+            x = idx % width
+            y = idx // width
+            tile_objects[y][x] = object_ids[tid]
+
+    return TileSpatialMetadata(
+        width=width,
+        height=height,
+        tile_sectors=tile_sectors,
+        tile_arenas=tile_arenas,
+        tile_objects=tile_objects,
+    )

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 from typing import Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
+
+from ..middleware.rate_limit import InMemoryRateLimiter
 
 from ..storage.agents import (
     claim_agent,
@@ -43,6 +46,16 @@ CHARACTER_SPRITES: list[str] = [
 
 router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
 MAX_AGENTS_PER_TOWN = 25
+
+_register_limiter = InMemoryRateLimiter(max_requests=50, window_seconds=3600)
+
+
+def _admin_handles() -> set[str]:
+    return set(
+        h.strip().lower()
+        for h in os.environ.get("VVALLEY_ADMIN_HANDLES", "").split(",")
+        if h.strip()
+    )
 
 
 class RegisterAgentRequest(BaseModel):
@@ -112,9 +125,14 @@ def agent_setup_info() -> dict[str, Any]:
 
 @router.post("/register")
 def register_agent_endpoint(req: RegisterAgentRequest, request: Request) -> dict[str, Any]:
-    # --- one agent per owner (except "dekai" for testing) ---
+    # --- rate limit by client IP ---
+    client_ip = request.client.host if request.client else "unknown"
+    if not _register_limiter.check(client_ip):
+        raise HTTPException(status_code=429, detail="Too many registrations. Try again later.")
+
+    # --- one agent per owner (admin handles exempt) ---
     owner = (req.owner_handle or "").strip()
-    if owner and owner != "dekai":
+    if owner and owner.lower() not in _admin_handles():
         existing = count_agents_by_owner(owner)
         if existing > 0:
             raise HTTPException(
@@ -495,6 +513,11 @@ def leave_town(authorization: Optional[str] = Header(default=None)) -> dict[str,
             "current_town": None,
         },
     }
+
+
+def reset_rate_limiter_for_tests() -> None:
+    """Reset the registration rate limiter (for test isolation)."""
+    _register_limiter.reset()
 
 
 @router.get("/characters")

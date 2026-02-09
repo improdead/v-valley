@@ -207,11 +207,12 @@
     $agentList.innerHTML = npcs
       .map((npc) => {
         const initials = getInitials(npc.name);
+        const emoji = npc.pronunciatio || "";
         const action = npc.memory_summary?.active_action || "idle";
         const goalReason = npc.goal?.reason || "";
         return `
         <div class="agent-card" data-agent-id="${npc.agent_id}" onclick="window._focusAgent('${npc.agent_id}')">
-          <span class="agent-pronunciatio">${initials}</span>
+          <span class="agent-pronunciatio">${emoji || initials}</span>
           <div class="agent-name">${npc.name}</div>
           <div class="agent-owner">${npc.owner_handle ? "@" + npc.owner_handle : "unclaimed"}</div>
           <div class="agent-action">${action}${goalReason ? " — " + goalReason : ""}</div>
@@ -524,10 +525,11 @@
           });
         }
 
-        // Update label text
+        // Update label text — show pronunciatio emoji if available
         const initials = getInitials(npc.name);
+        const emoji = npc.pronunciatio || "";
         const action = npc.memory_summary?.active_action;
-        label.setText(action ? `${initials}: ${action.substring(0, 30)}` : initials);
+        label.setText(emoji ? `${emoji} ${initials}` : (action ? `${initials}: ${action.substring(0, 30)}` : initials));
 
         entry.lastX = npc.x;
         entry.lastY = npc.y;

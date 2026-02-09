@@ -176,6 +176,114 @@ _JSON_SCHEMA_TASKS: dict[str, dict[str, Any]] = {
         "required": ["schedule", "currently"],
         "additionalProperties": False,
     },
+    "pronunciatio": {
+        "type": "object",
+        "properties": {
+            "emoji": {"type": "string", "maxLength": 10},
+            "event_triple": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string", "maxLength": 100},
+                    "predicate": {"type": "string", "maxLength": 100},
+                    "object": {"type": "string", "maxLength": 100},
+                },
+                "required": ["subject", "predicate", "object"],
+                "additionalProperties": False,
+            },
+        },
+        "required": ["emoji", "event_triple"],
+        "additionalProperties": False,
+    },
+    "wake_up_hour": {
+        "type": "object",
+        "properties": {
+            "wake_up_hour": {"type": "integer", "minimum": 0, "maximum": 23},
+        },
+        "required": ["wake_up_hour"],
+        "additionalProperties": False,
+    },
+    "action_address": {
+        "type": "object",
+        "properties": {
+            "action_sector": {"type": "string"},
+            "action_arena": {"type": "string"},
+            "action_game_object": {"type": "string"},
+        },
+        "required": ["action_sector"],
+        "additionalProperties": False,
+    },
+    "object_state": {
+        "type": "object",
+        "properties": {
+            "object_description": {"type": "string"},
+            "object_event_triple": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "predicate": {"type": "string"},
+                    "object": {"type": "string"},
+                },
+            },
+        },
+        "required": ["object_description"],
+        "additionalProperties": False,
+    },
+    "event_reaction": {
+        "type": "object",
+        "properties": {
+            "react": {"type": "boolean"},
+            "reason": {"type": "string"},
+            "new_action": {"type": "string"},
+        },
+        "required": ["react", "reason"],
+        "additionalProperties": False,
+    },
+    "relationship_summary": {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string"},
+            "conversation_tone": {"type": "string"},
+        },
+        "required": ["summary"],
+        "additionalProperties": False,
+    },
+    "first_daily_plan": {
+        "type": "object",
+        "properties": {
+            "schedule": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string"},
+                        "duration_mins": {"type": "integer"},
+                    },
+                },
+            },
+            "currently": {"type": "string"},
+        },
+        "required": ["schedule", "currently"],
+        "additionalProperties": False,
+    },
+    "schedule_recomposition": {
+        "type": "object",
+        "properties": {
+            "schedule": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string"},
+                        "duration_mins": {"type": "integer"},
+                    },
+                },
+            },
+            "inserted_activity": {"type": "string"},
+            "inserted_duration_mins": {"type": "integer"},
+        },
+        "required": ["schedule"],
+        "additionalProperties": False,
+    },
 }
 
 
@@ -542,6 +650,78 @@ _TASK_PROMPTS: dict[str, tuple[str, str]] = {
         "- lifestyle (string, sleep/wake habits like 'goes to bed around 11pm, wakes at 7am')\n"
         "- daily_plan_req (string, numbered daily plan)\n"
         "- daily_req (array of 5-7 short activity strings with times)\n\n"
+    ),
+    "pronunciatio": (
+        "You are a V-Valley action emoji tagger. Given an agent's current action description, "
+        "return a single emoji that best represents the action, and a subject-predicate-object "
+        "event triple. Return a JSON object.",
+
+        "What emoji best represents this action? Also extract an event triple.\n"
+        "Output: JSON with emoji (string, single emoji character), "
+        "event_triple (object with subject, predicate, object strings).\n\n"
+    ),
+    "wake_up_hour": (
+        "You are a V-Valley daily routine analyzer. Given an agent's lifestyle description "
+        "and personality, determine what hour they typically wake up. Return a JSON object.",
+
+        "Based on this agent's lifestyle, what hour (0-23) do they typically wake up?\n"
+        "Output: JSON with wake_up_hour (integer 0-23).\n\n"
+    ),
+    "action_address": (
+        "You are a V-Valley spatial planner. Given an agent's current action and the available "
+        "locations in town, choose the best sector, arena (room), and game object where this "
+        "action should take place. Consider the agent's identity and living area. Return JSON.",
+
+        "Where should this agent go to perform their current action?\n"
+        "Choose from the available sectors, arenas, and objects.\n"
+        "Output: JSON with action_sector (string), action_arena (string or null), "
+        "action_game_object (string or null).\n\n"
+    ),
+    "object_state": (
+        "You are a V-Valley object state tracker. When an agent uses a game object, "
+        "describe the current state of that object. Return JSON.",
+
+        "Describe the state of this object while the agent is using it.\n"
+        "Output: JSON with object_description (string), "
+        "object_event_triple (object with subject, predicate, object).\n\n"
+    ),
+    "event_reaction": (
+        "You are a V-Valley event reaction analyzer. Given a perceived event and the agent's "
+        "current activity, decide if the agent should react by changing their plan. "
+        "Agents owned by users should stay true to their personality. Return JSON.",
+
+        "Should this agent react to the observed event by changing their current plan?\n"
+        "Output: JSON with react (boolean), reason (string), "
+        "new_action (string, only if react=true).\n\n"
+    ),
+    "relationship_summary": (
+        "You are a V-Valley relationship narrator. Given two agents' identities and their "
+        "interaction history, write a brief narrative summary of their relationship "
+        "to ground a conversation. Return JSON.",
+
+        "Summarize the relationship between these two agents before they start talking.\n"
+        "Output: JSON with summary (string, 1-2 sentences), "
+        "conversation_tone (string: warm/polite/cautious/playful).\n\n"
+    ),
+    "first_daily_plan": (
+        "You are a V-Valley first-day planner. This agent just arrived in the town. "
+        "Generate an exploratory daily schedule that helps them settle in, explore, "
+        "and meet neighbors. Consider their personality and background. Return JSON.",
+
+        "Create a first-day schedule for this newly arrived agent.\n"
+        "Include exploration, settling in, and socializing.\n"
+        "Output: JSON with schedule (array of {description, duration_mins}), "
+        "currently (string describing their initial focus).\n\n"
+    ),
+    "schedule_recomposition": (
+        "You are a V-Valley schedule recomposer. An agent's current plan was interrupted "
+        "by a reaction or conversation. Rewrite the remainder of their daily schedule "
+        "to accommodate the interrupting activity while preserving as much of the "
+        "original plan as possible. Total schedule should be ~1440 minutes. Return JSON.",
+
+        "Recompose this agent's daily schedule after an interruption.\n"
+        "Insert the new activity at the current time, then adjust remaining blocks.\n"
+        "Output: JSON with schedule (array of {description, duration_mins}).\n\n"
     ),
 }
 

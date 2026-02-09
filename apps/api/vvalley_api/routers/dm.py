@@ -18,9 +18,12 @@ from ..storage.interaction_hub import (
     reject_dm_request,
     send_dm_message,
 )
+from ..middleware.rate_limit import InMemoryRateLimiter
 
 
 router = APIRouter(prefix="/api/v1/agents/dm", tags=["dm"])
+
+_dm_limiter = InMemoryRateLimiter(max_requests=30, window_seconds=60)
 
 
 class CreateDmRequestRequest(BaseModel):
@@ -54,9 +57,16 @@ def _require_agent(authorization: Optional[str]) -> dict[str, object]:
     return agent
 
 
+def _require_agent_checked(authorization: Optional[str]) -> dict[str, object]:
+    agent = _require_agent(authorization)
+    if not _dm_limiter.check(str(agent["id"])):
+        raise HTTPException(status_code=429, detail="DM rate limit exceeded. Slow down.")
+    return agent
+
+
 @router.get("/check")
 def dm_check(authorization: Optional[str] = Header(default=None)) -> dict[str, object]:
-    agent = _require_agent(authorization)
+    agent = _require_agent_checked(authorization)
     agent_id = str(agent["id"])
     pending_requests = list_dm_requests(
         agent_id=agent_id,
@@ -77,7 +87,7 @@ def dm_check(authorization: Optional[str] = Header(default=None)) -> dict[str, o
 
 @router.post("/request")
 def dm_request(req: CreateDmRequestRequest, authorization: Optional[str] = Header(default=None)) -> dict[str, object]:
-    agent = _require_agent(authorization)
+    agent = _require_agent_checked(authorization)
     sender_id = str(agent["id"])
     receiver_id = str(req.target_agent_id).strip()
 
@@ -109,7 +119,7 @@ def dm_requests(
     limit: int = Query(default=50, ge=1, le=200),
     authorization: Optional[str] = Header(default=None),
 ) -> dict[str, object]:
-    agent = _require_agent(authorization)
+    agent = _require_agent_checked(authorization)
     items = list_dm_requests(
         agent_id=str(agent["id"]),
         direction=direction,
@@ -125,7 +135,7 @@ def dm_requests(
 
 @router.post("/requests/{request_id}/approve")
 def approve_request(request_id: str, authorization: Optional[str] = Header(default=None)) -> dict[str, object]:
-    agent = _require_agent(authorization)
+    agent = _require_agent_checked(authorization)
     result = approve_dm_request(agent_id=str(agent["id"]), request_id=str(request_id))
     if not result:
         raise HTTPException(status_code=404, detail="DM request not found")
@@ -137,7 +147,7 @@ def approve_request(request_id: str, authorization: Optional[str] = Header(defau
 
 @router.post("/requests/{request_id}/reject")
 def reject_request(request_id: str, authorization: Optional[str] = Header(default=None)) -> dict[str, object]:
-    agent = _require_agent(authorization)
+    agent = _require_agent_checked(authorization)
     result = reject_dm_request(agent_id=str(agent["id"]), request_id=str(request_id))
     if not result:
         raise HTTPException(status_code=404, detail="DM request not found")
@@ -152,7 +162,7 @@ def dm_conversations(
     limit: int = Query(default=50, ge=1, le=200),
     authorization: Optional[str] = Header(default=None),
 ) -> dict[str, object]:
-    agent = _require_agent(authorization)
+    agent = _require_agent_checked(authorization)
     items = list_dm_conversations(agent_id=str(agent["id"]), limit=limit)
     return {
         "ok": True,
@@ -167,7 +177,7 @@ def dm_conversation(
     limit_messages: int = Query(default=100, ge=1, le=500),
     authorization: Optional[str] = Header(default=None),
 ) -> dict[str, object]:
-    agent = _require_agent(authorization)
+    agent = _require_agent_checked(authorization)
     snapshot = get_dm_conversation(
         agent_id=str(agent["id"]),
         conversation_id=str(conversation_id),
@@ -187,7 +197,7 @@ def dm_send(
     req: SendDmMessageRequest,
     authorization: Optional[str] = Header(default=None),
 ) -> dict[str, object]:
-    agent = _require_agent(authorization)
+    agent = _require_agent_checked(authorization)
     snapshot = get_dm_conversation(
         agent_id=str(agent["id"]),
         conversation_id=str(conversation_id),
@@ -208,3 +218,8 @@ def dm_send(
         "ok": True,
         "message": message,
     }
+
+
+def reset_dm_rate_limiter_for_tests() -> None:
+    """Reset DM rate limiter (for test isolation)."""
+    _dm_limiter.reset()

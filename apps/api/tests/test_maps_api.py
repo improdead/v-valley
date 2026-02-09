@@ -16,6 +16,7 @@ TEST_DB_DIR = tempfile.TemporaryDirectory(dir=ROOT)
 os.environ["VVALLEY_DB_PATH"] = str(Path(TEST_DB_DIR.name) / "test_vvalley.db")
 
 from apps.api.vvalley_api.main import app
+from apps.api.vvalley_api.routers.agents import reset_rate_limiter_for_tests as reset_rate_limiter
 from apps.api.vvalley_api.storage.agents import reset_backend_cache_for_tests as reset_agents_backend
 from apps.api.vvalley_api.storage.interaction_hub import reset_backend_cache_for_tests as reset_interaction_backend
 from apps.api.vvalley_api.storage.llm_control import reset_backend_cache_for_tests as reset_llm_backend
@@ -35,6 +36,7 @@ class MapsApiTests(unittest.TestCase):
         reset_llm_backend()
         reset_runtime_backend()
         reset_interaction_backend()
+        reset_rate_limiter()
         self.client = TestClient(app)
 
     def test_healthz(self) -> None:

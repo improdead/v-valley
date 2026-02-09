@@ -1,0 +1,14 @@
+.git
+.vvalley_sim_state
+__pycache__
+*.pyc
+.env
+.env.*
+!.env.example
+data/
+generative_agents/
+apps/web/
+.pytest_cache
+.mypy_cache
+*.egg-info
+.DS_Store

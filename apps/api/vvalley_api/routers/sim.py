@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from packages.vvalley_core.maps.map_utils import load_map
 from packages.vvalley_core.sim.cognition import CognitionPlanner
 from packages.vvalley_core.sim.runner import (
+    SimulationBusyError,
     get_agent_context_snapshot,
     get_agent_memory_snapshot,
     get_simulation_state,
@@ -29,6 +30,7 @@ from ..storage.llm_control import get_policy as get_llm_policy
 from ..storage.llm_control import insert_call_log
 from ..storage.map_versions import get_active_version
 from ..storage.runtime_control import (
+    claim_town_lease,
     complete_tick_batch,
     get_agent_autonomy,
     list_dead_letters,
@@ -36,6 +38,7 @@ from ..storage.runtime_control import (
     get_town_runtime,
     list_agent_autonomy,
     record_dead_letter,
+    release_town_lease,
     reserve_tick_batch,
     upsert_town_runtime,
 )
@@ -44,6 +47,7 @@ from ..services.runtime_scheduler import (
     town_runtime_scheduler_status,
 )
 from ..services.interaction_sink import ingest_tick_outcomes
+from ..middleware.rate_limit import InMemoryRateLimiter
 
 
 logger = logging.getLogger("vvalley_api.sim")
@@ -53,6 +57,9 @@ _COGNITION_PLANNER = CognitionPlanner(policy_lookup=get_llm_policy, log_sink=ins
 PLANNING_SCOPE_PATTERN = "^(short_action|short|daily_plan|daily|long_term_plan|long_term|long)$"
 CONTROL_MODE_PATTERN = "^(external|autopilot|hybrid)$"
 NODE_KIND_PATTERN = "^(event|thought|chat|reflection)$"
+
+_context_limiter = InMemoryRateLimiter(max_requests=30, window_seconds=60)
+_action_limiter = InMemoryRateLimiter(max_requests=20, window_seconds=60)
 
 
 class TickTownRequest(BaseModel):
@@ -225,6 +232,9 @@ def town_agent_context(
     authorization: Optional[str] = Header(default=None),
 ) -> dict[str, Any]:
     agent = _require_agent_membership(town_id=town_id, authorization=authorization)
+    agent_id_str = str(agent["id"])
+    if not _context_limiter.check(agent_id_str):
+        raise HTTPException(status_code=429, detail="Context polling too fast. Slow down.")
     logger.info(
         "[SIM] Agent context request: town_id='%s', agent_id='%s', scope='%s'",
         town_id,
@@ -262,6 +272,8 @@ def town_agent_action(
     authorization: Optional[str] = Header(default=None),
 ) -> dict[str, Any]:
     agent = _require_agent_membership(town_id=town_id, authorization=authorization)
+    if not _action_limiter.check(str(agent["id"])):
+        raise HTTPException(status_code=429, detail="Action submission too fast. Slow down.")
     logger.info(
         "[SIM] Agent action submit: town_id='%s', agent_id='%s', scope='%s'",
         town_id,
@@ -305,92 +317,102 @@ def town_tick(town_id: str, req: TickTownRequest) -> dict[str, Any]:
         req.control_mode,
     )
     active, map_data, members = _load_runtime_inputs(town_id)
-    idempotency_key = str(req.idempotency_key or "").strip()
-    idempotent_request = bool(idempotency_key)
-    batch_row_key = (
-        f"manual:{idempotency_key}"
-        if idempotent_request
-        else f"manual:auto:{uuid.uuid4().hex}"
-    )
 
-    reserve = reserve_tick_batch(
-        town_id=town_id,
-        batch_key=batch_row_key,
-        step_before=None,
-    )
-    if idempotent_request and reserve.get("state") == "existing":
-        status = str(reserve.get("status") or "")
-        if status == "completed" and isinstance(reserve.get("result"), dict):
-            return {
-                "ok": True,
-                "town_id": town_id,
-                "active_map": {
-                    "id": active["id"],
-                    "version": int(active["version"]),
-                    "map_name": active.get("map_name"),
-                },
-                "tick": reserve["result"],
-                "interaction_ingest": {"inbox_created": 0, "escalations_created": 0},
-                "idempotent_replay": True,
-                "tick_metrics_24h": get_tick_metrics(town_id=town_id, window_hours=24),
-            }
-        if status == "pending":
-            raise HTTPException(status_code=409, detail="Tick batch with this idempotency_key is still pending")
-    elif not idempotent_request and reserve.get("state") == "existing":
-        # Extremely unlikely UUID collision fallback.
-        batch_row_key = f"manual:auto:{uuid.uuid4().hex}"
-        reserve_tick_batch(
+    # --- lease to prevent concurrent manual + scheduler ticks ---
+    lease_owner = f"manual:{uuid.uuid4().hex[:12]}"
+    if not claim_town_lease(town_id=town_id, lease_owner=lease_owner, lease_ttl_seconds=30):
+        raise HTTPException(status_code=409, detail="Town is currently being ticked by another process")
+
+    try:
+        idempotency_key = str(req.idempotency_key or "").strip()
+        idempotent_request = bool(idempotency_key)
+        batch_row_key = (
+            f"manual:{idempotency_key}"
+            if idempotent_request
+            else f"manual:auto:{uuid.uuid4().hex}"
+        )
+
+        reserve = reserve_tick_batch(
             town_id=town_id,
             batch_key=batch_row_key,
             step_before=None,
         )
+        if idempotent_request and reserve.get("state") == "existing":
+            status = str(reserve.get("status") or "")
+            if status == "completed" and isinstance(reserve.get("result"), dict):
+                return {
+                    "ok": True,
+                    "town_id": town_id,
+                    "active_map": {
+                        "id": active["id"],
+                        "version": int(active["version"]),
+                        "map_name": active.get("map_name"),
+                    },
+                    "tick": reserve["result"],
+                    "interaction_ingest": {"inbox_created": 0, "escalations_created": 0},
+                    "idempotent_replay": True,
+                    "tick_metrics_24h": get_tick_metrics(town_id=town_id, window_hours=24),
+                }
+            if status == "pending":
+                raise HTTPException(status_code=409, detail="Tick batch with this idempotency_key is still pending")
+        elif not idempotent_request and reserve.get("state") == "existing":
+            # Extremely unlikely UUID collision fallback.
+            batch_row_key = f"manual:auto:{uuid.uuid4().hex}"
+            reserve_tick_batch(
+                town_id=town_id,
+                batch_key=batch_row_key,
+                step_before=None,
+            )
 
-    autonomy_map = _autonomy_map_for_members(members)
-    try:
-        ticked = tick_simulation(
-            town_id=town_id,
-            active_version=active,
-            map_data=map_data,
-            members=members,
-            steps=req.steps,
-            planning_scope=req.planning_scope,
-            control_mode=req.control_mode,
-            planner=_COGNITION_PLANNER.plan_move,
-            agent_autonomy=autonomy_map,
-            cognition_planner=_COGNITION_PLANNER,
-        )
+        autonomy_map = _autonomy_map_for_members(members)
         try:
-            interaction_ingest = ingest_tick_outcomes(
+            ticked = tick_simulation(
                 town_id=town_id,
+                active_version=active,
+                map_data=map_data,
                 members=members,
-                tick_result=ticked,
+                steps=req.steps,
+                planning_scope=req.planning_scope,
+                control_mode=req.control_mode,
+                planner=_COGNITION_PLANNER.plan_move,
+                agent_autonomy=autonomy_map,
+                cognition_planner=_COGNITION_PLANNER,
             )
-        except Exception as sink_exc:
-            record_dead_letter(
+            try:
+                interaction_ingest = ingest_tick_outcomes(
+                    town_id=town_id,
+                    members=members,
+                    tick_result=ticked,
+                )
+            except Exception as sink_exc:
+                record_dead_letter(
+                    town_id=town_id,
+                    stage="interaction_sink_manual_tick",
+                    payload={"batch_key": batch_row_key},
+                    error=f"{sink_exc.__class__.__name__}: {sink_exc}",
+                )
+                interaction_ingest = {"inbox_created": 0, "escalations_created": 0}
+            complete_tick_batch(
                 town_id=town_id,
-                stage="interaction_sink_manual_tick",
-                payload={"batch_key": batch_row_key},
-                error=f"{sink_exc.__class__.__name__}: {sink_exc}",
+                batch_key=batch_row_key,
+                success=True,
+                step_after=int(ticked.get("step") or 0),
+                result=ticked,
+                error=None,
             )
-            interaction_ingest = {"inbox_created": 0, "escalations_created": 0}
-        complete_tick_batch(
-            town_id=town_id,
-            batch_key=batch_row_key,
-            success=True,
-            step_after=int(ticked.get("step") or 0),
-            result=ticked,
-            error=None,
-        )
-    except Exception as exc:
-        complete_tick_batch(
-            town_id=town_id,
-            batch_key=batch_row_key,
-            success=False,
-            step_after=None,
-            result=None,
-            error=f"{exc.__class__.__name__}: {exc}",
-        )
-        raise
+        except Exception as exc:
+            complete_tick_batch(
+                town_id=town_id,
+                batch_key=batch_row_key,
+                success=False,
+                step_after=None,
+                result=None,
+                error=f"{exc.__class__.__name__}: {exc}",
+            )
+            raise
+    finally:
+        release_town_lease(town_id=town_id, lease_owner=lease_owner)
+
     return {
         "ok": True,
         "town_id": town_id,
@@ -475,3 +497,9 @@ def town_dead_letters(
         "count": len(items),
         "items": items,
     }
+
+
+def reset_sim_rate_limiters_for_tests() -> None:
+    """Reset gameplay rate limiters (for test isolation)."""
+    _context_limiter.reset()
+    _action_limiter.reset()

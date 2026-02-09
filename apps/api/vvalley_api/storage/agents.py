@@ -12,6 +12,7 @@ import logging
 import os
 import secrets
 import sqlite3
+import threading
 import uuid
 
 logger = logging.getLogger("vvalley_api.storage.agents")
@@ -103,16 +104,33 @@ class AgentStore(ABC):
     def update_agent_sprite(self, *, agent_id: str, sprite_name: str) -> None:
         raise NotImplementedError
 
+    def ping(self) -> bool:
+        """Verify DB connectivity. Returns True or raises."""
+        return True
+
 
 class SQLiteAgentStore(AgentStore):
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
+        self._initialized = False
+        self._local = threading.local()
+
+    def ping(self) -> bool:
+        with self._connect() as conn:
+            conn.execute("SELECT 1")
+        return True
 
     def _connect(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            return conn
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        self._local.conn = conn
         return conn
 
     @staticmethod
@@ -129,6 +147,8 @@ class SQLiteAgentStore(AgentStore):
         return {k: row[k] for k in row.keys()}
 
     def init_db(self) -> None:
+        if self._initialized:
+            return
         logger.info("[STORAGE] Initializing SQLite agent database at '%s'", self.db_path)
         with self._connect() as conn:
             conn.execute(
@@ -175,6 +195,7 @@ class SQLiteAgentStore(AgentStore):
             except sqlite3.OperationalError:
                 pass  # column already exists
         logger.info("[STORAGE] SQLite agent database initialized successfully")
+        self._initialized = True
 
     def register_agent(
         self,
@@ -415,6 +436,11 @@ class PostgresAgentStore(AgentStore):
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
         self._ensure_driver()
+
+    def ping(self) -> bool:
+        with self._connect() as conn:
+            conn.execute("SELECT 1")
+        return True
 
     @staticmethod
     def _ensure_driver() -> None:

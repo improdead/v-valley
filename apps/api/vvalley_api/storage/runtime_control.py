@@ -10,6 +10,7 @@ from typing import Any, Optional
 import json
 import os
 import sqlite3
+import threading
 import uuid
 
 
@@ -400,15 +401,25 @@ class RuntimeControlStore(ABC):
 class SQLiteRuntimeControlStore(RuntimeControlStore):
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
+        self._initialized = False
+        self._local = threading.local()
 
     def _connect(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            return conn
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        self._local.conn = conn
         return conn
 
     def init_db(self) -> None:
+        if self._initialized:
+            return
         with self._connect() as conn:
             conn.execute(
                 f"""
@@ -499,6 +510,7 @@ class SQLiteRuntimeControlStore(RuntimeControlStore):
                 "CREATE INDEX IF NOT EXISTS idx_interaction_dead_letters_town_created "
                 "ON interaction_dead_letters(town_id, created_at DESC)"
             )
+        self._initialized = True
 
     def get_agent_autonomy(self, *, agent_id: str) -> dict[str, Any]:
         self.init_db()

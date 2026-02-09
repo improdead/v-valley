@@ -68,6 +68,47 @@ def parse_blocks_csv(path):
     return mapping
 
 
+def parse_arena_blocks_csv(path):
+    """Parse arena_blocks CSV.
+
+    Returns dict mapping tile_id → (sector_name, arena_name).
+    """
+    mapping = {}
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            # Format: "32138, the Ville, artist's co-living space, Latoya Williams's room"
+            if len(parts) >= 4:
+                tile_id = int(parts[0])
+                sector = parts[2]
+                arena = parts[3]
+                mapping[tile_id] = (sector, arena)
+    return mapping
+
+
+def parse_game_object_blocks_csv(path):
+    """Parse game_object_blocks CSV.
+
+    Returns dict mapping tile_id → object_name.
+    """
+    mapping = {}
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            # Format: "32227, the Ville, <all>, bed"
+            if len(parts) >= 4:
+                tile_id = int(parts[0])
+                obj_name = parts[3]
+                mapping[tile_id] = obj_name
+    return mapping
+
+
 def parse_spawning_blocks_csv(path):
     """Parse the spawning_location_blocks CSV.
 
@@ -302,7 +343,10 @@ def main():
     # ---- Load GA special_blocks CSVs ----
     sector_blocks = parse_blocks_csv(GA_MATRIX / "special_blocks" / "sector_blocks.csv")
     spawn_blocks = parse_spawning_blocks_csv(GA_MATRIX / "special_blocks" / "spawning_location_blocks.csv")
-    print(f"Loaded {len(sector_blocks)} sector definitions, {len(spawn_blocks)} spawn definitions")
+    arena_blocks = parse_arena_blocks_csv(GA_MATRIX / "special_blocks" / "arena_blocks.csv")
+    game_object_blocks = parse_game_object_blocks_csv(GA_MATRIX / "special_blocks" / "game_object_blocks.csv")
+    print(f"Loaded {len(sector_blocks)} sector, {len(arena_blocks)} arena, "
+          f"{len(game_object_blocks)} object, {len(spawn_blocks)} spawn definitions")
 
     # ---- Extract actual positions from tile layers ----
     sector_layer = find_layer(layers, "Sector Blocks")
@@ -465,6 +509,26 @@ def main():
         layer["id"] = i
 
     data["layers"] = new_layers
+
+    # ---- Embed spatial lookup tables for runtime use ----
+    # These allow map_utils.py to resolve tile IDs to sector/arena/object names
+    spatial_lookups = {
+        "sector_ids": {str(k): v for k, v in sector_blocks.items()},
+        "arena_ids": {str(k): list(v) for k, v in arena_blocks.items()},
+        "game_object_ids": {str(k): v for k, v in game_object_blocks.items()},
+    }
+    # Store in map custom properties
+    if "properties" not in data:
+        data["properties"] = []
+    # Remove any existing spatial_lookups property
+    data["properties"] = [p for p in data["properties"] if p.get("name") != "spatial_lookups"]
+    data["properties"].append({
+        "name": "spatial_lookups",
+        "type": "string",
+        "value": json.dumps(spatial_lookups, separators=(",", ":")),
+    })
+    print(f"\nEmbedded spatial_lookups: {len(sector_blocks)} sectors, "
+          f"{len(arena_blocks)} arenas, {len(game_object_blocks)} objects")
 
     # ---- Write output ----
     DST.parent.mkdir(parents=True, exist_ok=True)
