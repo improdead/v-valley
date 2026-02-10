@@ -1515,5 +1515,571 @@ class MultiplayerHardeningTests(unittest.TestCase):
         self.assertTrue(limiter.check("agent-2"))
 
 
+class AgentLifecycleTests(unittest.TestCase):
+    """Tests for Phase 7A-7F: agent lifecycle, departure/arrival events,
+    auto-town creation, action resilience, per-town locks, server discovery."""
+
+    def setUp(self) -> None:
+        os.environ["VVALLEY_DB_PATH"] = str(TEST_DB_PATH)
+        if TEST_DB_PATH.exists():
+            TEST_DB_PATH.unlink()
+        reset_agents_backend()
+        reset_maps_backend()
+        reset_llm_backend()
+        reset_runtime_backend()
+        reset_interaction_backend()
+        reset_rate_limiter()
+        self.client = TestClient(app)
+
+    # ── helpers ──────────────────────────────────────────────────────
+
+    def _publish_town(self, town_id: str) -> None:
+        resp = self.client.post(
+            "/api/v1/maps/publish-version",
+            json={
+                "town_id": town_id,
+                "map_path": "assets/templates/starter_town/map.json",
+                "map_name": "starter",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+
+    def _register_and_claim(self, name: str = "TestAgent") -> dict:
+        resp = self.client.post(
+            "/api/v1/agents/register",
+            json={"name": name, "auto_claim": True, "owner_handle": f"owner-{uuid.uuid4().hex[:6]}"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        return resp.json()["agent"]
+
+    def _join_town(self, api_key: str, town_id: str) -> dict:
+        resp = self.client.post(
+            "/api/v1/agents/me/join-town",
+            json={"town_id": town_id},
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        return resp.json()
+
+    def _leave_town(self, api_key: str) -> dict:
+        resp = self.client.post(
+            "/api/v1/agents/me/leave-town",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        return resp.json()
+
+    def _setup_runtime(self, town_id: str, members: list[dict]) -> dict:
+        """Sync a town runtime and return the state dict."""
+        from packages.vvalley_core.sim.runner import (
+            get_simulation_state,
+            reset_simulation_states_for_tests,
+        )
+        from apps.api.vvalley_api.storage.map_versions import get_active_version
+
+        active = get_active_version(town_id)
+        import json
+        map_path = ROOT / active["map_json_path"]
+        with open(map_path) as f:
+            map_data = json.load(f)
+        return get_simulation_state(
+            town_id=town_id,
+            active_version=active,
+            map_data=map_data,
+            members=members,
+        )
+
+    # ── Phase 7A: Graceful departure + departure events ─────────────
+
+    def test_evict_agent_removes_npc_and_injects_departure_events(self) -> None:
+        """Evicting an agent should remove its NPC and inject departure events
+        into all remaining agents' memories."""
+        from packages.vvalley_core.sim.runner import (
+            SimulationRunner,
+            reset_simulation_states_for_tests,
+        )
+
+        reset_simulation_states_for_tests()
+        runner = SimulationRunner()
+        active = {"id": "v1", "version": 1, "map_name": "test", "town_id": "t-evict"}
+        map_data = {
+            "width": 4, "height": 4, "tilewidth": 32, "tileheight": 32,
+            "layers": [{"name": "collision", "data": [0] * 16}],
+            "spawns": [{"x": 0, "y": 0}],
+            "locations": [],
+        }
+        members = [
+            {"agent_id": "a1", "name": "Alice"},
+            {"agent_id": "a2", "name": "Bob"},
+            {"agent_id": "a3", "name": "Charlie"},
+        ]
+        runner.get_state(
+            town_id="t-evict",
+            active_version=active,
+            map_data=map_data,
+            members=members,
+        )
+        runtime = runner._towns["t-evict"]
+        self.assertIn("a2", runtime.npcs)
+
+        # Record initial memory counts
+        alice_nodes_before = len(runtime.npcs["a1"].memory.nodes)
+        charlie_nodes_before = len(runtime.npcs["a3"].memory.nodes)
+
+        # Evict Bob
+        runner.evict_agent(town_id="t-evict", agent_id="a2")
+
+        # Bob should be gone
+        self.assertNotIn("a2", runtime.npcs)
+
+        # Alice and Charlie should each have a departure event
+        alice_nodes_after = len(runtime.npcs["a1"].memory.nodes)
+        charlie_nodes_after = len(runtime.npcs["a3"].memory.nodes)
+        self.assertEqual(alice_nodes_after, alice_nodes_before + 1)
+        self.assertEqual(charlie_nodes_after, charlie_nodes_before + 1)
+
+        # Check the departure event content
+        alice_last_node = runtime.npcs["a1"].memory.nodes[-1]
+        self.assertEqual(alice_last_node.kind, "event")
+        self.assertEqual(alice_last_node.subject, "Bob")
+        self.assertEqual(alice_last_node.predicate, "left")
+        self.assertEqual(alice_last_node.object, "the valley")
+        self.assertEqual(alice_last_node.poignancy, 6)
+        self.assertIn("left the valley", alice_last_node.description)
+        self.assertIn("Bob", alice_last_node.description)
+
+        reset_simulation_states_for_tests()
+
+    def test_evict_nonexistent_agent_is_noop(self) -> None:
+        """Evicting an agent not in the town should be a no-op."""
+        from packages.vvalley_core.sim.runner import (
+            SimulationRunner,
+            reset_simulation_states_for_tests,
+        )
+
+        reset_simulation_states_for_tests()
+        runner = SimulationRunner()
+        active = {"id": "v1", "version": 1, "map_name": "test", "town_id": "t-evict2"}
+        map_data = {
+            "width": 4, "height": 4, "tilewidth": 32, "tileheight": 32,
+            "layers": [{"name": "collision", "data": [0] * 16}],
+            "spawns": [{"x": 0, "y": 0}],
+            "locations": [],
+        }
+        runner.get_state(
+            town_id="t-evict2",
+            active_version=active,
+            map_data=map_data,
+            members=[{"agent_id": "a1", "name": "Alice"}],
+        )
+
+        # Evict non-existent agent — should not crash
+        runner.evict_agent(town_id="t-evict2", agent_id="nonexistent")
+        self.assertIn("a1", runner._towns["t-evict2"].npcs)
+
+        # Evict from non-existent town — should not crash
+        runner.evict_agent(town_id="nonexistent-town", agent_id="a1")
+
+        reset_simulation_states_for_tests()
+
+    def test_evict_cleans_up_social_state(self) -> None:
+        """Evicting an agent should clean up cooldowns, wait states,
+        and conversations involving the departed agent."""
+        from packages.vvalley_core.sim.runner import (
+            SimulationRunner,
+            reset_simulation_states_for_tests,
+        )
+
+        reset_simulation_states_for_tests()
+        runner = SimulationRunner()
+        active = {"id": "v1", "version": 1, "map_name": "test", "town_id": "t-evict3"}
+        map_data = {
+            "width": 4, "height": 4, "tilewidth": 32, "tileheight": 32,
+            "layers": [{"name": "collision", "data": [0] * 16}],
+            "spawns": [{"x": 0, "y": 0}],
+            "locations": [],
+        }
+        runner.get_state(
+            town_id="t-evict3",
+            active_version=active,
+            map_data=map_data,
+            members=[
+                {"agent_id": "a1", "name": "Alice"},
+                {"agent_id": "a2", "name": "Bob"},
+            ],
+        )
+        runtime = runner._towns["t-evict3"]
+
+        # Manually inject social state involving a2
+        runtime.social_interrupt_cooldowns["a1|a2"] = 10
+        runtime.social_interrupt_cooldowns["a2|a1"] = 10
+        runtime.social_interrupt_cooldowns["a1|other"] = 5
+        runtime.social_wait_states["a1"] = {"target_agent_id": "a2"}
+        runtime.social_wait_states["a2"] = {"target_agent_id": "a1"}
+
+        runner.evict_agent(town_id="t-evict3", agent_id="a2")
+
+        # Cooldowns involving a2 should be removed
+        self.assertNotIn("a1|a2", runtime.social_interrupt_cooldowns)
+        self.assertNotIn("a2|a1", runtime.social_interrupt_cooldowns)
+        # Unrelated cooldown should survive
+        self.assertIn("a1|other", runtime.social_interrupt_cooldowns)
+        # Wait states involving a2 should be removed
+        self.assertNotIn("a1", runtime.social_wait_states)
+        self.assertNotIn("a2", runtime.social_wait_states)
+
+        reset_simulation_states_for_tests()
+
+    def test_leave_town_no_membership_returns_false(self) -> None:
+        """Leave town with no membership should return left: false, no crash."""
+        agent = self._register_and_claim("NoTown Agent")
+        result = self._leave_town(agent["api_key"])
+        self.assertFalse(result["left"])
+
+    # ── Phase 7B: Arrival events + last_town preference ─────────────
+
+    def test_new_agent_triggers_arrival_events(self) -> None:
+        """When a new agent joins a town, existing agents should get
+        an arrival event in their memory."""
+        from packages.vvalley_core.sim.runner import (
+            SimulationRunner,
+            reset_simulation_states_for_tests,
+        )
+
+        reset_simulation_states_for_tests()
+        runner = SimulationRunner()
+        active = {"id": "v1", "version": 1, "map_name": "test", "town_id": "t-arrival"}
+        map_data = {
+            "width": 4, "height": 4, "tilewidth": 32, "tileheight": 32,
+            "layers": [{"name": "collision", "data": [0] * 16}],
+            "spawns": [{"x": 0, "y": 0}],
+            "locations": [],
+        }
+
+        # First sync with just Alice
+        runner.get_state(
+            town_id="t-arrival",
+            active_version=active,
+            map_data=map_data,
+            members=[{"agent_id": "a1", "name": "Alice"}],
+        )
+        alice_nodes_before = len(runner._towns["t-arrival"].npcs["a1"].memory.nodes)
+
+        # Second sync adds Bob — this triggers arrival event for Alice
+        runner.get_state(
+            town_id="t-arrival",
+            active_version=active,
+            map_data=map_data,
+            members=[
+                {"agent_id": "a1", "name": "Alice"},
+                {"agent_id": "a2", "name": "Bob"},
+            ],
+        )
+
+        alice_nodes_after = len(runner._towns["t-arrival"].npcs["a1"].memory.nodes)
+        self.assertEqual(alice_nodes_after, alice_nodes_before + 1)
+
+        arrival_node = runner._towns["t-arrival"].npcs["a1"].memory.nodes[-1]
+        self.assertEqual(arrival_node.kind, "event")
+        self.assertEqual(arrival_node.subject, "Bob")
+        self.assertEqual(arrival_node.predicate, "arrived in")
+        self.assertEqual(arrival_node.object, "the valley")
+        self.assertEqual(arrival_node.poignancy, 4)
+        self.assertIn("arrived in the valley", arrival_node.description)
+
+        reset_simulation_states_for_tests()
+
+    def test_last_town_saved_on_leave(self) -> None:
+        """When an agent leaves a town, last_town_id should be stored."""
+        from apps.api.vvalley_api.storage.agents import get_agent_last_town
+
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+
+        agent = self._register_and_claim("LastTown Agent")
+        self._join_town(agent["api_key"], town_id)
+
+        # Leave town
+        self._leave_town(agent["api_key"])
+
+        # Check last_town_id is saved
+        last = get_agent_last_town(agent_id=agent["id"])
+        self.assertEqual(last, town_id)
+
+    def test_auto_join_prefers_last_town(self) -> None:
+        """Auto-join should prefer the agent's last town if it has capacity."""
+        town_a = f"town-{uuid.uuid4().hex[:8]}"
+        town_b = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_a)
+        self._publish_town(town_b)
+
+        agent = self._register_and_claim("Rejoin Agent")
+        self._join_town(agent["api_key"], town_a)
+        self._leave_town(agent["api_key"])
+
+        # Auto-join should prefer town_a
+        resp = self.client.post(
+            "/api/v1/agents/me/auto-join",
+            headers={"Authorization": f"Bearer {agent['api_key']}"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        membership = resp.json()["membership"]
+        self.assertEqual(membership["town_id"], town_a)
+
+    # ── Phase 7C: Auto-town creation ────────────────────────────────
+
+    def test_auto_create_town_function(self) -> None:
+        """_auto_create_town should scaffold a new town from the template."""
+        from apps.api.vvalley_api.routers.agents import _auto_create_town
+        from apps.api.vvalley_api.storage.map_versions import list_town_ids
+
+        town_id = _auto_create_town()
+        self.assertIsNotNone(town_id)
+        self.assertTrue(town_id.startswith("valley-"))
+        self.assertIn(town_id, list_town_ids())
+
+    # ── Phase 7D: Action resilience ─────────────────────────────────
+
+    def test_evict_cancels_actions_targeting_departed_agent(self) -> None:
+        """When an agent is evicted, active actions targeting them
+        should be cancelled and the remaining agent set to idle."""
+        from packages.vvalley_core.sim.runner import (
+            SimulationRunner,
+            reset_simulation_states_for_tests,
+        )
+
+        reset_simulation_states_for_tests()
+        runner = SimulationRunner()
+        active = {"id": "v1", "version": 1, "map_name": "test", "town_id": "t-resilience"}
+        map_data = {
+            "width": 4, "height": 4, "tilewidth": 32, "tileheight": 32,
+            "layers": [{"name": "collision", "data": [0] * 16}],
+            "spawns": [{"x": 0, "y": 0}],
+            "locations": [],
+        }
+        runner.get_state(
+            town_id="t-resilience",
+            active_version=active,
+            map_data=map_data,
+            members=[
+                {"agent_id": "a1", "name": "Alice"},
+                {"agent_id": "a2", "name": "Bob"},
+                {"agent_id": "a3", "name": "Charlie"},
+            ],
+        )
+        runtime = runner._towns["t-resilience"]
+
+        # Alice has a talk_to targeting Bob (socials format)
+        runtime.active_actions["a1"] = {
+            "socials": [{"target_agent_id": "a2", "message": "hi"}],
+        }
+        runtime.npcs["a1"].status = "moving"
+
+        # Charlie has a non-social action (no socials)
+        runtime.active_actions["a3"] = {
+            "target_x": 2,
+            "target_y": 2,
+        }
+        runtime.npcs["a3"].status = "moving"
+
+        # Evict Bob
+        runner.evict_agent(town_id="t-resilience", agent_id="a2")
+
+        # Alice's action should be cancelled
+        self.assertNotIn("a1", runtime.active_actions)
+        self.assertEqual(runtime.npcs["a1"].status, "idle")
+
+        # Charlie's action should be unaffected
+        self.assertIn("a3", runtime.active_actions)
+        self.assertEqual(runtime.npcs["a3"].status, "moving")
+
+        reset_simulation_states_for_tests()
+
+    def test_sync_town_cancels_actions_targeting_removed_agents(self) -> None:
+        """sync_town should cancel active actions targeting agents
+        who have been removed from the members list."""
+        from packages.vvalley_core.sim.runner import (
+            SimulationRunner,
+            reset_simulation_states_for_tests,
+        )
+
+        reset_simulation_states_for_tests()
+        runner = SimulationRunner()
+        active = {"id": "v1", "version": 1, "map_name": "test", "town_id": "t-sync-resil"}
+        map_data = {
+            "width": 4, "height": 4, "tilewidth": 32, "tileheight": 32,
+            "layers": [{"name": "collision", "data": [0] * 16}],
+            "spawns": [{"x": 0, "y": 0}],
+            "locations": [],
+        }
+        # Sync with both agents
+        runner.get_state(
+            town_id="t-sync-resil",
+            active_version=active,
+            map_data=map_data,
+            members=[
+                {"agent_id": "a1", "name": "Alice"},
+                {"agent_id": "a2", "name": "Bob"},
+            ],
+        )
+        runtime = runner._towns["t-sync-resil"]
+
+        # Alice targets Bob (socials format)
+        runtime.active_actions["a1"] = {
+            "socials": [{"target_agent_id": "a2", "message": "hi"}],
+        }
+        runtime.npcs["a1"].status = "moving"
+
+        # Sync again without Bob — simulates Bob leaving via membership removal
+        runner.get_state(
+            town_id="t-sync-resil",
+            active_version=active,
+            map_data=map_data,
+            members=[{"agent_id": "a1", "name": "Alice"}],
+        )
+
+        # Alice's action targeting Bob should be cancelled
+        self.assertNotIn("a1", runtime.active_actions)
+        self.assertEqual(runtime.npcs["a1"].status, "idle")
+
+        reset_simulation_states_for_tests()
+
+    # ── Phase 7E: Per-town locks ────────────────────────────────────
+
+    def test_per_town_lock_isolation(self) -> None:
+        """Operations on different towns should not block each other."""
+        import threading
+        from packages.vvalley_core.sim.runner import (
+            _lock_for_town,
+            _acquire_town_or_raise,
+            SimulationBusyError,
+            reset_simulation_states_for_tests,
+        )
+
+        reset_simulation_states_for_tests()
+
+        # Hold lock on town-a
+        lock_a = _lock_for_town("town-a")
+        lock_held = threading.Event()
+        release = threading.Event()
+
+        def hold_lock_a():
+            with lock_a:
+                lock_held.set()
+                release.wait(timeout=5)
+
+        t = threading.Thread(target=hold_lock_a, daemon=True)
+        t.start()
+        lock_held.wait(timeout=2)
+
+        try:
+            # town-b should be acquirable even though town-a is locked
+            lock_b = _acquire_town_or_raise("town-b", timeout=0.5)
+            lock_b.release()  # success
+
+            # town-a should NOT be acquirable
+            with self.assertRaises(SimulationBusyError):
+                _acquire_town_or_raise("town-a", timeout=0.1)
+        finally:
+            release.set()
+            t.join(timeout=2)
+
+        reset_simulation_states_for_tests()
+
+    def test_lock_for_town_returns_same_lock_for_same_town(self) -> None:
+        """_lock_for_town should return the same RLock for the same town_id."""
+        from packages.vvalley_core.sim.runner import (
+            _lock_for_town,
+            reset_simulation_states_for_tests,
+        )
+
+        reset_simulation_states_for_tests()
+        lock1 = _lock_for_town("same-town")
+        lock2 = _lock_for_town("same-town")
+        self.assertIs(lock1, lock2)
+
+        lock3 = _lock_for_town("different-town")
+        self.assertIsNot(lock1, lock3)
+
+        reset_simulation_states_for_tests()
+
+    # ── Phase 7F: Server discovery ──────────────────────────────────
+
+    def test_town_summary_includes_availability_fields(self) -> None:
+        """Town summary should include available_slots and is_full."""
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+
+        resp = self.client.get(f"/api/v1/towns/{town_id}")
+        self.assertEqual(resp.status_code, 200)
+        town = resp.json()["town"]
+        self.assertIn("available_slots", town)
+        self.assertIn("is_full", town)
+        self.assertEqual(town["available_slots"], 25)
+        self.assertFalse(town["is_full"])
+        self.assertEqual(town["population"], 0)
+
+    def test_town_list_includes_availability_fields(self) -> None:
+        """Town list should include available_slots and is_full for each town."""
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+
+        resp = self.client.get("/api/v1/towns")
+        self.assertEqual(resp.status_code, 200)
+        towns = resp.json()["towns"]
+        self.assertTrue(len(towns) > 0)
+        for town in towns:
+            self.assertIn("available_slots", town)
+            self.assertIn("is_full", town)
+
+    def test_town_availability_reflects_population(self) -> None:
+        """available_slots and is_full should reflect actual population."""
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+
+        # Join one agent
+        agent = self._register_and_claim("Slot Agent")
+        self._join_town(agent["api_key"], town_id)
+
+        resp = self.client.get(f"/api/v1/towns/{town_id}")
+        town = resp.json()["town"]
+        self.assertEqual(town["population"], 1)
+        self.assertEqual(town["available_slots"], 24)
+        self.assertFalse(town["is_full"])
+
+    # ── Integration: departure + rejoin end-to-end ──────────────────
+
+    def test_leave_and_rejoin_fresh_start(self) -> None:
+        """Agent that leaves and rejoins should start fresh (new NPC state)."""
+        from packages.vvalley_core.sim.runner import (
+            SimulationRunner,
+            reset_simulation_states_for_tests,
+        )
+
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+
+        agent = self._register_and_claim("Fresh Agent")
+        self._join_town(agent["api_key"], town_id)
+
+        # Get initial state
+        reset_simulation_states_for_tests()
+
+        # Leave
+        self._leave_town(agent["api_key"])
+
+        # Rejoin same town
+        self._join_town(agent["api_key"], town_id)
+
+        # Agent should be in the town
+        me = self.client.get(
+            "/api/v1/agents/me",
+            headers={"Authorization": f"Bearer {agent['api_key']}"},
+        )
+        self.assertEqual(me.json()["agent"]["current_town"]["town_id"], town_id)
+
+        reset_simulation_states_for_tests()
+
+
 if __name__ == "__main__":
     unittest.main()

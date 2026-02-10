@@ -2670,6 +2670,88 @@ class SimulationRunner:
                 )
         return reflection_events
 
+    def evict_agent(self, *, town_id: str, agent_id: str) -> None:
+        """Immediately remove an agent from the town runtime and inject departure events."""
+        runtime = self._towns.get(town_id)
+        if runtime is None:
+            return
+        npc = runtime.npcs.get(agent_id)
+        if npc is None:
+            return
+        departed_name = npc.name
+
+        runtime.pending_actions.pop(agent_id, None)
+        runtime.active_actions.pop(agent_id, None)
+        runtime.autonomy_tick_counts.pop(agent_id, None)
+
+        for pair_key in list(runtime.social_interrupt_cooldowns.keys()):
+            parts = pair_key.split("|")
+            if len(parts) == 2 and (parts[0] == agent_id or parts[1] == agent_id):
+                runtime.social_interrupt_cooldowns.pop(pair_key, None)
+
+        for waiting_id in list(runtime.social_wait_states.keys()):
+            if waiting_id == agent_id:
+                runtime.social_wait_states.pop(waiting_id, None)
+                continue
+            payload = runtime.social_wait_states.get(waiting_id)
+            target = str((payload or {}).get("target_agent_id") or "").strip()
+            if target == agent_id:
+                runtime.social_wait_states.pop(waiting_id, None)
+
+        # End conversation sessions BEFORE removing NPC so partner name
+        # resolves correctly in _end_conversation_session
+        for session_id in list(runtime.conversation_sessions.keys()):
+            session = runtime.conversation_sessions.get(session_id)
+            if session is None:
+                runtime.conversation_sessions.pop(session_id, None)
+                continue
+            if session.agent_a == agent_id or session.agent_b == agent_id:
+                self._end_conversation_session(town=runtime, session_id=session_id, end_step=runtime.step)
+
+        runtime.agent_conversations.pop(agent_id, None)
+        self._prune_conversations(town=runtime, step=runtime.step)
+
+        # Now remove the NPC from the town
+        runtime.npcs.pop(agent_id, None)
+
+        # Cancel active actions that target the departed agent
+        for remaining_id in list(runtime.active_actions.keys()):
+            action = runtime.active_actions.get(remaining_id)
+            if action is None:
+                continue
+            # target_agent_id lives inside socials items, not at top level
+            socials = action.get("socials") or action.get("_socials_pending") or []
+            targets_departed = any(
+                str(s.get("target_agent_id") or "").strip() == agent_id
+                for s in socials
+                if isinstance(s, dict)
+            )
+            if targets_departed:
+                runtime.active_actions.pop(remaining_id, None)
+                runtime.pending_actions.pop(remaining_id, None)
+                remaining_npc = runtime.npcs.get(remaining_id)
+                if remaining_npc:
+                    remaining_npc.status = "idle"
+
+        # Inject departure event into every remaining agent's memory
+        for other_id, other_npc in runtime.npcs.items():
+            other_npc.memory.add_node(
+                kind="event",
+                step=runtime.step,
+                subject=departed_name,
+                predicate="left",
+                object="the valley",
+                description=(
+                    f"{departed_name} has left the valley. "
+                    f"They packed their things and moved away. "
+                    f"The people who knew {departed_name} will remember them, "
+                    f"but life in the valley continues."
+                ),
+                poignancy=6,
+            )
+
+        self._persist_runtime(runtime)
+
     def sync_town(
         self,
         *,
@@ -2741,15 +2823,35 @@ class SimulationRunner:
 
         self._prune_conversations(town=runtime, step=runtime.step)
 
+        # Cancel active actions targeting departed agents
+        for remaining_id in list(runtime.active_actions.keys()):
+            action = runtime.active_actions.get(remaining_id)
+            if action is None:
+                continue
+            # target_agent_id lives inside socials items, not at top level
+            socials = action.get("socials") or action.get("_socials_pending") or []
+            targets_departed = any(
+                str(s.get("target_agent_id") or "").strip() not in allowed_ids
+                for s in socials
+                if isinstance(s, dict) and str(s.get("target_agent_id") or "").strip()
+            )
+            if targets_departed:
+                runtime.active_actions.pop(remaining_id, None)
+                runtime.pending_actions.pop(remaining_id, None)
+                remaining_npc = runtime.npcs.get(remaining_id)
+                if remaining_npc:
+                    remaining_npc.status = "idle"
+
         for idx, member in enumerate(limited_members):
             agent_id = str(member["agent_id"])
             npc = runtime.npcs.get(agent_id)
             if npc is None:
                 spawn_x, spawn_y = self._spawn_for(runtime, idx)
                 member_persona = member.get("personality") if isinstance(member.get("personality"), dict) else None
+                name = str(member.get("name") or f"Agent-{agent_id[:8]}")
                 runtime.npcs[agent_id] = NpcState(
                     agent_id=agent_id,
-                    name=str(member.get("name") or f"Agent-{agent_id[:8]}"),
+                    name=name,
                     owner_handle=member.get("owner_handle"),
                     claim_status=str(member.get("claim_status") or "unknown"),
                     x=spawn_x,
@@ -2760,12 +2862,28 @@ class SimulationRunner:
                     persona=member_persona,
                     memory=AgentMemory.bootstrap(
                         agent_id=agent_id,
-                        agent_name=str(member.get("name") or f"Agent-{agent_id[:8]}"),
+                        agent_name=name,
                         step=runtime.step,
                         persona=member_persona,
                     ),
                 )
                 runtime.npcs[agent_id].memory.set_position(x=spawn_x, y=spawn_y, step=runtime.step)
+                # Inject arrival event into existing agents' memories
+                for other_id, other_npc in runtime.npcs.items():
+                    if other_id == agent_id:
+                        continue
+                    other_npc.memory.add_node(
+                        kind="event",
+                        step=runtime.step,
+                        subject=name,
+                        predicate="arrived in",
+                        object="the valley",
+                        description=(
+                            f"{name} has just arrived in the valley. "
+                            f"They are new here and looking to settle in."
+                        ),
+                        poignancy=4,
+                    )
                 continue
 
             npc.name = str(member.get("name") or npc.name)
@@ -3806,7 +3924,9 @@ class SimulationRunner:
 
 
 _RUNNER = SimulationRunner()
-_RUNNER_LOCK = threading.RLock()
+_RUNNER_LOCK = threading.RLock()  # backward compat alias for tests / archive
+_TOWN_LOCKS: dict[str, threading.RLock] = {}
+_TOWN_LOCKS_GUARD = threading.Lock()
 _LOCK_TIMEOUT = 5  # seconds — non-tick callers give up after this
 
 
@@ -3814,8 +3934,31 @@ class SimulationBusyError(Exception):
     """Raised when the simulation lock cannot be acquired within the timeout."""
 
 
+def _lock_for_town(town_id: str) -> threading.RLock:
+    """Get or create an RLock for the given town_id."""
+    lock = _TOWN_LOCKS.get(town_id)
+    if lock is not None:
+        return lock
+    with _TOWN_LOCKS_GUARD:
+        lock = _TOWN_LOCKS.get(town_id)
+        if lock is None:
+            lock = threading.RLock()
+            _TOWN_LOCKS[town_id] = lock
+        return lock
+
+
+def _acquire_town_or_raise(town_id: str, timeout: float = _LOCK_TIMEOUT) -> threading.RLock:
+    """Acquire per-town lock with timeout; raise SimulationBusyError on failure."""
+    lock = _lock_for_town(town_id)
+    if not lock.acquire(timeout=timeout):
+        raise SimulationBusyError(
+            f"Town '{town_id}' is busy (tick in progress). Retry shortly."
+        )
+    return lock
+
+
 def _acquire_or_raise(timeout: float = _LOCK_TIMEOUT) -> None:
-    """Acquire _RUNNER_LOCK with a timeout; raise SimulationBusyError on failure."""
+    """Backward compat: acquire global _RUNNER_LOCK with timeout."""
     if not _RUNNER_LOCK.acquire(timeout=timeout):
         raise SimulationBusyError(
             "Simulation is busy (tick in progress). Retry shortly."
@@ -3823,6 +3966,8 @@ def _acquire_or_raise(timeout: float = _LOCK_TIMEOUT) -> None:
 
 
 def reset_simulation_states_for_tests(*, clear_persisted: bool = True) -> None:
+    with _TOWN_LOCKS_GUARD:
+        _TOWN_LOCKS.clear()
     with _RUNNER_LOCK:
         _RUNNER.reset(clear_persisted=clear_persisted)
 
@@ -3834,7 +3979,7 @@ def get_simulation_state(
     map_data: dict[str, Any],
     members: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    _acquire_or_raise()
+    lock = _acquire_town_or_raise(town_id)
     try:
         return _RUNNER.get_state(
             town_id=town_id,
@@ -3843,7 +3988,7 @@ def get_simulation_state(
             members=members,
         )
     finally:
-        _RUNNER_LOCK.release()
+        lock.release()
 
 
 def get_agent_memory_snapshot(
@@ -3855,7 +4000,7 @@ def get_agent_memory_snapshot(
     agent_id: str,
     limit: int = 40,
 ) -> dict[str, Any] | None:
-    _acquire_or_raise()
+    lock = _acquire_town_or_raise(town_id)
     try:
         return _RUNNER.get_agent_memory(
             town_id=town_id,
@@ -3866,7 +4011,7 @@ def get_agent_memory_snapshot(
             limit=limit,
         )
     finally:
-        _RUNNER_LOCK.release()
+        lock.release()
 
 
 def get_agent_context_snapshot(
@@ -3878,7 +4023,7 @@ def get_agent_context_snapshot(
     agent_id: str,
     planning_scope: str = "short_action",
 ) -> dict[str, Any] | None:
-    _acquire_or_raise()
+    lock = _acquire_town_or_raise(town_id)
     try:
         return _RUNNER.get_agent_context(
             town_id=town_id,
@@ -3889,7 +4034,7 @@ def get_agent_context_snapshot(
             planning_scope=planning_scope,
         )
     finally:
-        _RUNNER_LOCK.release()
+        lock.release()
 
 
 def submit_agent_action(
@@ -3901,7 +4046,7 @@ def submit_agent_action(
     agent_id: str,
     action: dict[str, Any],
 ) -> dict[str, Any] | None:
-    _acquire_or_raise()
+    lock = _acquire_town_or_raise(town_id)
     try:
         return _RUNNER.submit_agent_action(
             town_id=town_id,
@@ -3912,7 +4057,7 @@ def submit_agent_action(
             action=action,
         )
     finally:
-        _RUNNER_LOCK.release()
+        lock.release()
 
 
 def tick_simulation(
@@ -3928,7 +4073,9 @@ def tick_simulation(
     agent_autonomy: dict[str, dict[str, Any]] | None = None,
     cognition_planner: Any = None,
 ) -> dict[str, Any]:
-    with _RUNNER_LOCK:
+    lock = _lock_for_town(town_id)
+    lock.acquire()  # blocking — ticks should wait
+    try:
         return _RUNNER.tick(
             town_id=town_id,
             active_version=active_version,
@@ -3941,3 +4088,14 @@ def tick_simulation(
             agent_autonomy=agent_autonomy,
             cognition_planner=cognition_planner,
         )
+    finally:
+        lock.release()
+
+
+def evict_agent_from_town(*, town_id: str, agent_id: str) -> None:
+    """Evict an agent from a town, inject departure events, and persist."""
+    lock = _acquire_town_or_raise(town_id)
+    try:
+        _RUNNER.evict_agent(town_id=town_id, agent_id=agent_id)
+    finally:
+        lock.release()

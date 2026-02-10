@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
+import threading
+import uuid as _uuid
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -16,6 +20,7 @@ from ..storage.agents import (
     claim_agent,
     count_active_agents_in_town,
     count_agents_by_owner,
+    get_agent_last_town,
     get_agent_town,
     get_agent_by_api_key,
     join_agent_town,
@@ -29,6 +34,9 @@ from ..storage.map_versions import list_versions, list_town_ids
 from ..storage.runtime_control import (
     get_agent_autonomy,
     upsert_agent_autonomy,
+)
+from ..storage.interaction_hub import (
+    close_dm_conversations_for_agent,
 )
 
 logger = logging.getLogger("vvalley_api.agents")
@@ -46,8 +54,74 @@ CHARACTER_SPRITES: list[str] = [
 
 router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
 MAX_AGENTS_PER_TOWN = 25
+_WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
 
 _register_limiter = InMemoryRateLimiter(max_requests=50, window_seconds=3600)
+_AUTO_TOWN_LOCK = threading.Lock()
+
+
+def _auto_create_town() -> str | None:
+    """Scaffold and publish a new town from the starter template."""
+    from ..storage.map_versions import publish_version, activate_version, next_version
+
+    template_map = _WORKSPACE_ROOT / "assets" / "templates" / "starter_town" / "map.json"
+    if not template_map.exists():
+        logger.error("[AGENTS] Auto-create failed: starter template not found at %s", template_map)
+        return None
+
+    with _AUTO_TOWN_LOCK:
+        from packages.vvalley_core.maps.map_utils import load_map, map_sha256_json, parse_location_objects
+        from packages.vvalley_core.maps.nav import build_nav_payload
+        from packages.vvalley_core.maps.validator import validate_map
+
+        map_data = load_map(template_map)
+        errors, _, _ = validate_map(map_data)
+        if errors:
+            logger.error("[AGENTS] Auto-create failed: template validation errors: %s", errors)
+            return None
+
+        town_id = f"valley-{_uuid.uuid4().hex[:8]}"
+        store_dir = _WORKSPACE_ROOT / "assets" / "maps" / "v_valley" / town_id
+        store_dir.mkdir(parents=True, exist_ok=True)
+
+        version_number = next_version(town_id)
+        map_snapshot = store_dir / f"v{version_number}.map.json"
+        nav_snapshot = store_dir / f"v{version_number}.nav.json"
+
+        source_sha = map_sha256_json(map_data)
+        map_snapshot.write_text(json.dumps(map_data, indent=2), encoding="utf-8")
+
+        _, _, _, nav_payload = build_nav_payload(
+            map_data,
+            source_map_file=str(map_snapshot.relative_to(_WORKSPACE_ROOT)),
+            source_sha256=source_sha,
+        )
+        nav_snapshot.write_text(json.dumps(nav_payload, indent=2), encoding="utf-8")
+
+        affordance_rows = []
+        for loc in parse_location_objects(map_data):
+            for aff in loc.affordances:
+                affordance_rows.append({
+                    "location_name": loc.name,
+                    "tile_x": loc.x,
+                    "tile_y": loc.y,
+                    "affordance": aff,
+                    "metadata_json": None,
+                })
+
+        publish_version(
+            town_id=town_id,
+            version=version_number,
+            map_name="starter_town",
+            map_json_path=str(map_snapshot.relative_to(_WORKSPACE_ROOT)),
+            nav_data_path=str(nav_snapshot.relative_to(_WORKSPACE_ROOT)),
+            source_sha256=source_sha,
+            affordances=affordance_rows,
+            notes="Auto-created town (all existing towns were full)",
+        )
+        activate_version(town_id=town_id, version=version_number)
+        logger.info("[AGENTS] Auto-created new town: town_id='%s'", town_id)
+        return town_id
 
 
 def _admin_handles() -> set[str]:
@@ -457,14 +531,46 @@ def auto_join_town(authorization: Optional[str] = Header(default=None)) -> dict[
 
     best_town = None
     best_pop = MAX_AGENTS_PER_TOWN + 1
-    for tid in town_ids:
-        pop = count_active_agents_in_town(tid)
-        if pop < MAX_AGENTS_PER_TOWN and pop < best_pop:
-            best_town = tid
+
+    # Prefer the agent's last town if it has capacity
+    last_town = get_agent_last_town(agent_id=agent["id"])
+    if last_town and last_town in town_ids:
+        pop = count_active_agents_in_town(last_town)
+        if pop < MAX_AGENTS_PER_TOWN:
+            best_town = last_town
             best_pop = pop
 
     if not best_town:
-        raise HTTPException(status_code=409, detail="All towns are full")
+        for tid in town_ids:
+            pop = count_active_agents_in_town(tid)
+            if pop < MAX_AGENTS_PER_TOWN and pop < best_pop:
+                best_town = tid
+                best_pop = pop
+
+    if not best_town:
+        try:
+            new_town_id = _auto_create_town()
+        except Exception:
+            logger.exception("[AGENTS] Auto-town creation failed")
+            new_town_id = None
+        if not new_town_id:
+            raise HTTPException(status_code=409, detail="All towns are full and auto-creation failed")
+        best_town = new_town_id
+        best_pop = 0
+
+    # Ensure unique sprite in the target town
+    members = list_active_agents_in_town(best_town)
+    used_sprites = {
+        m.get("sprite_name") for m in members
+        if m.get("sprite_name") and str(m.get("agent_id")) != str(agent["id"])
+    }
+    agent_sprite = agent.get("sprite_name")
+    if agent_sprite in used_sprites:
+        available = [s for s in CHARACTER_SPRITES if s not in used_sprites]
+        if available:
+            agent_sprite = random.choice(available)
+            update_agent_sprite(agent_id=str(agent["id"]), sprite_name=agent_sprite)
+            logger.info("[AGENTS] Auto-join reassigned sprite for agent %s to '%s'", agent["id"], agent_sprite)
 
     membership = join_agent_town(agent_id=agent["id"], town_id=best_town)
     if not membership:
@@ -488,20 +594,48 @@ def auto_join_town(authorization: Optional[str] = Header(default=None)) -> dict[
 def leave_town(authorization: Optional[str] = Header(default=None)) -> dict[str, Any]:
     api_key = _require_bearer_token(authorization)
     logger.info("[AGENTS] Leave town request received")
-    
+
     agent = get_agent_by_api_key(api_key)
     if not agent:
         logger.warning("[AGENTS] Leave town failed - invalid API key")
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    logger.debug("[AGENTS] Agent leaving town: agent_id=%s, name='%s'", agent["id"], agent["name"])
-    
+    membership = get_agent_town(agent_id=agent["id"])
+    if not membership:
+        logger.info("[AGENTS] Agent leave town - no active membership: agent_id=%s", agent["id"])
+        return {
+            "ok": True,
+            "left": False,
+            "agent": {
+                "id": agent["id"],
+                "name": agent["name"],
+                "status": agent["claim_status"],
+                "claimed": bool(agent.get("claimed", False)),
+                "current_town": None,
+            },
+        }
+
+    town_id = str(membership["town_id"])
+    logger.debug("[AGENTS] Agent leaving town: agent_id=%s, name='%s', town_id='%s'", agent["id"], agent["name"], town_id)
+
+    # 1. Evict from simulation + inject departure events into remaining agents
+    try:
+        from packages.vvalley_core.sim.runner import evict_agent_from_town
+        evict_agent_from_town(town_id=town_id, agent_id=str(agent["id"]))
+    except Exception:
+        logger.exception("[AGENTS] Failed to evict agent from runtime (will be cleaned up lazily)")
+
+    # 2. Close DM conversations involving this agent
+    try:
+        close_dm_conversations_for_agent(agent_id=str(agent["id"]), town_id=town_id)
+    except Exception:
+        logger.exception("[AGENTS] Failed to close DM conversations on leave")
+
+    # 3. Remove membership
     left = leave_agent_town(agent_id=agent["id"])
     if left:
         logger.info("[AGENTS] Agent left town successfully: agent_id=%s, name='%s'", agent["id"], agent["name"])
-    else:
-        logger.info("[AGENTS] Agent leave town - no active membership: agent_id=%s", agent["id"])
-    
+
     return {
         "ok": True,
         "left": bool(left),

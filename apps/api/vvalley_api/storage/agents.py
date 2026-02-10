@@ -104,6 +104,10 @@ class AgentStore(ABC):
     def update_agent_sprite(self, *, agent_id: str, sprite_name: str) -> None:
         raise NotImplementedError
 
+    @abstractmethod
+    def get_agent_last_town(self, *, agent_id: str) -> Optional[str]:
+        raise NotImplementedError
+
     def ping(self) -> bool:
         """Verify DB connectivity. Returns True or raises."""
         return True
@@ -192,6 +196,10 @@ class SQLiteAgentStore(AgentStore):
             # Add sprite_name column if missing (SQLite has no IF NOT EXISTS for ALTER TABLE)
             try:
                 conn.execute("ALTER TABLE agents ADD COLUMN sprite_name TEXT")
+            except sqlite3.OperationalError:
+                pass  # column already exists
+            try:
+                conn.execute("ALTER TABLE agents ADD COLUMN last_town_id TEXT")
             except sqlite3.OperationalError:
                 pass  # column already exists
         logger.info("[STORAGE] SQLite agent database initialized successfully")
@@ -364,8 +372,18 @@ class SQLiteAgentStore(AgentStore):
     def clear_agent_town(self, *, agent_id: str) -> bool:
         self.init_db()
         logger.debug("[STORAGE] Clearing agent town membership: agent_id=%s", agent_id)
-        
+
         with self._connect() as conn:
+            # Save last_town_id before deleting membership
+            row = conn.execute(
+                "SELECT town_id FROM agent_town_memberships WHERE agent_id = ?",
+                (agent_id,),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE agents SET last_town_id = ? WHERE id = ?",
+                    (row["town_id"], agent_id),
+                )
             cur = conn.execute(
                 "DELETE FROM agent_town_memberships WHERE agent_id = ?",
                 (agent_id,),
@@ -430,6 +448,17 @@ class SQLiteAgentStore(AgentStore):
                 "UPDATE agents SET sprite_name = ? WHERE id = ?",
                 (sprite_name, agent_id),
             )
+
+    def get_agent_last_town(self, *, agent_id: str) -> Optional[str]:
+        self.init_db()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT last_town_id FROM agents WHERE id = ?",
+                (agent_id,),
+            ).fetchone()
+        if row and row["last_town_id"]:
+            return str(row["last_town_id"])
+        return None
 
 
 class PostgresAgentStore(AgentStore):
@@ -651,6 +680,16 @@ class PostgresAgentStore(AgentStore):
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
+                    "SELECT town_id FROM agent_town_memberships WHERE agent_id = %s::uuid",
+                    (agent_id,),
+                )
+                row = cur.fetchone()
+                if row:
+                    cur.execute(
+                        "UPDATE agents SET last_town_id = %s WHERE id = %s::uuid",
+                        (row["town_id"], agent_id),
+                    )
+                cur.execute(
                     "DELETE FROM agent_town_memberships WHERE agent_id = %s::uuid",
                     (agent_id,),
                 )
@@ -722,6 +761,19 @@ class PostgresAgentStore(AgentStore):
                     "UPDATE agents SET sprite_name = %s WHERE id = %s::uuid",
                     (sprite_name, agent_id),
                 )
+
+    def get_agent_last_town(self, *, agent_id: str) -> Optional[str]:
+        self.init_db()
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT last_town_id FROM agents WHERE id = %s::uuid",
+                    (agent_id,),
+                )
+                row = cur.fetchone()
+        if row and row.get("last_town_id"):
+            return str(row["last_town_id"])
+        return None
 
 
 def _resolve_sqlite_path(database_url: Optional[str]) -> Path:
@@ -821,3 +873,7 @@ def count_agents_by_owner(owner_handle: str) -> int:
 
 def update_agent_sprite(*, agent_id: str, sprite_name: str) -> None:
     _backend().update_agent_sprite(agent_id=agent_id, sprite_name=sprite_name)
+
+
+def get_agent_last_town(*, agent_id: str) -> Optional[str]:
+    return _backend().get_agent_last_town(agent_id=agent_id)

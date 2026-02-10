@@ -299,6 +299,15 @@ class InteractionHubStore(ABC):
     ) -> Optional[dict[str, Any]]:
         raise NotImplementedError
 
+    @abstractmethod
+    def close_conversations_for_agent(
+        self,
+        *,
+        agent_id: str,
+        town_id: Optional[str],
+    ) -> int:
+        raise NotImplementedError
+
 
 class SQLiteInteractionHubStore(InteractionHubStore):
     def __init__(self, db_path: Path) -> None:
@@ -1065,6 +1074,44 @@ class SQLiteInteractionHubStore(InteractionHubStore):
 
         return message
 
+    def close_conversations_for_agent(
+        self,
+        *,
+        agent_id: str,
+        town_id: Optional[str],
+    ) -> int:
+        agent_id = str(agent_id).strip()
+        if not agent_id:
+            return 0
+        self.init_db()
+        closed = 0
+        with self._connect() as conn:
+            if town_id:
+                cur = conn.execute(
+                    "UPDATE dm_conversations SET status = 'closed', "
+                    f"updated_at = {_now_utc_sqlite()} "
+                    "WHERE status = 'active' AND town_id = ? "
+                    "AND (agent_a_id = ? OR agent_b_id = ?)",
+                    (str(town_id), agent_id, agent_id),
+                )
+            else:
+                cur = conn.execute(
+                    "UPDATE dm_conversations SET status = 'closed', "
+                    f"updated_at = {_now_utc_sqlite()} "
+                    "WHERE status = 'active' "
+                    "AND (agent_a_id = ? OR agent_b_id = ?)",
+                    (agent_id, agent_id),
+                )
+            closed = cur.rowcount
+            conn.execute(
+                "UPDATE dm_requests SET status = 'expired', "
+                f"updated_at = {_now_utc_sqlite()} "
+                "WHERE status = 'pending' "
+                "AND (from_agent_id = ? OR to_agent_id = ?)",
+                (agent_id, agent_id),
+            )
+        return closed
+
 
 class PostgresInteractionHubStore(InteractionHubStore):
     def __init__(self, database_url: str) -> None:
@@ -1767,6 +1814,45 @@ class PostgresInteractionHubStore(InteractionHubStore):
                         )
         return message
 
+    def close_conversations_for_agent(
+        self,
+        *,
+        agent_id: str,
+        town_id: Optional[str],
+    ) -> int:
+        agent_id = str(agent_id).strip()
+        if not agent_id:
+            return 0
+        self.init_db()
+        closed = 0
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                if town_id:
+                    cur.execute(
+                        "UPDATE dm_conversations SET status = 'closed', "
+                        "updated_at = NOW() "
+                        "WHERE status = 'active' AND town_id = %s "
+                        "AND (agent_a_id = %s OR agent_b_id = %s)",
+                        (str(town_id), agent_id, agent_id),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE dm_conversations SET status = 'closed', "
+                        "updated_at = NOW() "
+                        "WHERE status = 'active' "
+                        "AND (agent_a_id = %s OR agent_b_id = %s)",
+                        (agent_id, agent_id),
+                    )
+                closed = cur.rowcount
+                cur.execute(
+                    "UPDATE dm_requests SET status = 'expired', "
+                    "updated_at = NOW() "
+                    "WHERE status = 'pending' "
+                    "AND (from_agent_id = %s OR to_agent_id = %s)",
+                    (agent_id, agent_id),
+                )
+        return closed
+
 
 def _resolve_sqlite_path(database_url: Optional[str]) -> Path:
     if database_url and database_url.startswith("sqlite:///"):
@@ -1945,3 +2031,11 @@ def send_dm_message(
         needs_human_input=needs_human_input,
         metadata=metadata,
     )
+
+
+def close_dm_conversations_for_agent(
+    *,
+    agent_id: str,
+    town_id: Optional[str] = None,
+) -> int:
+    return _backend().close_conversations_for_agent(agent_id=agent_id, town_id=town_id)

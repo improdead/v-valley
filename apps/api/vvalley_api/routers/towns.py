@@ -47,6 +47,8 @@ def _town_summary(town_id: str) -> dict[str, Any]:
         "mode": "public",
         "population": population,
         "max_agents": 25,
+        "available_slots": max(0, 25 - population),
+        "is_full": population >= 25,
         "active_map_version": active_norm,
         "observer_mode": True,
     }
