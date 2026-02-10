@@ -401,6 +401,37 @@ main {
 }
 
 /* ────────────────────────────────────────────────────────
+   Features grid
+   ──────────────────────────────────────────────────────── */
+.features-grid {
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 0.5rem;
+}
+.feature-card {
+  border: var(--border);
+  background: linear-gradient(180deg, #f6fbe6 0%, var(--card-blue) 100%);
+  padding: 0.85rem;
+  box-shadow: 3px 3px 0 rgba(19, 35, 41, 0.2);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.feature-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 5px 5px 0 rgba(19, 35, 41, 0.3);
+}
+.feature-card h3 {
+  color: var(--wood-dark);
+  margin-bottom: 0.4rem;
+}
+.feature-card code {
+  font-family: var(--font-body);
+  background: rgba(19, 35, 41, 0.08);
+  padding: 0.1rem 0.3rem;
+  border: 1px solid rgba(19, 35, 41, 0.15);
+}
+
+/* ────────────────────────────────────────────────────────
    Setup checklist
    ──────────────────────────────────────────────────────── */
 .checklist {
@@ -593,6 +624,40 @@ input[type="checkbox"] {
   box-shadow: 2px 2px 0 rgba(19, 35, 41, 0.3);
   animation: badgePulse 3s ease-in-out infinite;
 }
+.badge-full {
+  background: linear-gradient(180deg, #ff9e9e 0%, #e85050 100%);
+  color: #fff;
+  text-shadow: 1px 1px 0 rgba(0,0,0,0.3);
+  animation: none;
+}
+.badge-open {
+  background: linear-gradient(180deg, #a8e060 0%, var(--grass) 100%);
+  color: #fff;
+  text-shadow: 1px 1px 0 rgba(0,0,0,0.3);
+  animation: none;
+}
+
+.town-card-live {
+  cursor: pointer;
+}
+.town-card-live:hover {
+  transform: translateY(-3px);
+  box-shadow: 6px 6px 0 rgba(19, 35, 41, 0.35);
+}
+
+.town-card-meta {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.subsection-title {
+  margin-top: 1.2rem;
+  margin-bottom: 0.2rem;
+  color: var(--ink-muted);
+}
 
 @keyframes badgePulse {
   0%, 100% { opacity: 1; }
@@ -632,6 +697,7 @@ input[type="checkbox"] {
 @media (max-width: 920px) {
   .hero { grid-template-columns: 1fr; }
   .steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .features-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .town-grid { grid-template-columns: 1fr; }
   .connect-grid { grid-template-columns: 1fr; }
 }
@@ -649,6 +715,7 @@ input[type="checkbox"] {
   }
   .topnav { justify-content: center; }
   .steps { grid-template-columns: 1fr; }
+  .features-grid { grid-template-columns: 1fr; }
   .quick-stats li { flex: 1 1 100%; }
   .hero { padding: 1rem; }
 }

@@ -32,6 +32,10 @@ const claimCodeInput = document.getElementById("claimCode");
 const claimOwnerInput = document.getElementById("claimOwner");
 const refreshTownsBtn = document.getElementById("refreshTownsBtn");
 const townsOutput = document.getElementById("townsOutput");
+const townCardsContainer = document.getElementById("townCardsContainer");
+const liveAgentsEl = document.getElementById("liveAgents");
+const autoJoinBtn = document.getElementById("autoJoinBtn");
+const simControlModeInput = document.getElementById("simControlMode");
 const legacyListBtn = document.getElementById("legacyListBtn");
 const legacyReplayBtn = document.getElementById("legacyReplayBtn");
 const legacyImportBtn = document.getElementById("legacyImportBtn");
@@ -218,16 +222,56 @@ async function refreshTowns() {
   townsOutput.textContent = "Loading towns...";
   try {
     const payload = await apiJson("/api/v1/towns");
-    const firstTown = Array.isArray(payload.towns) ? payload.towns[0] : null;
+    const towns = Array.isArray(payload.towns) ? payload.towns : [];
+    const firstTown = towns[0] || null;
     if (firstTown?.town_id && joinTownIdInput && !joinTownIdInput.value.trim()) {
       joinTownIdInput.value = firstTown.town_id;
     }
     if (firstTown?.town_id && simTownIdInput && !simTownIdInput.value.trim()) {
       simTownIdInput.value = firstTown.town_id;
     }
+
+    // Render live town cards
+    if (townCardsContainer) {
+      townCardsContainer.innerHTML = "";
+      let totalAgents = 0;
+      towns.forEach((town) => {
+        const pop = town.population || 0;
+        const maxPop = town.max_agents || 25;
+        const slots = town.available_slots != null ? town.available_slots : (maxPop - pop);
+        const isFull = town.is_full || pop >= maxPop;
+        totalAgents += pop;
+
+        const card = document.createElement("article");
+        card.className = "town-card town-card-live";
+        card.addEventListener("click", () => {
+          const base = getApiBase();
+          const viewerUrl = `./town.html?api=${encodeURIComponent(base)}`;
+          window.location.href = viewerUrl;
+        });
+
+        const badgeClass = isFull ? "badge badge-full" : "badge badge-open";
+        const badgeText = isFull ? "Full" : `${slots} slots open`;
+
+        card.innerHTML = `
+          <h3>${town.town_id || "unknown"}</h3>
+          <p>${pop}/${maxPop} agents</p>
+          <div class="town-card-meta">
+            <span class="${badgeClass}">${badgeText}</span>
+          </div>
+        `;
+        townCardsContainer.appendChild(card);
+      });
+
+      if (liveAgentsEl) {
+        liveAgentsEl.textContent = String(totalAgents);
+      }
+    }
+
     townsOutput.textContent = toPrettyJson(payload);
   } catch (err) {
     townsOutput.textContent = `ERROR: ${err.message}\n${toPrettyJson(err.payload || {})}`;
+    if (liveAgentsEl) liveAgentsEl.textContent = "n/a";
   }
 }
 
@@ -358,6 +402,31 @@ async function onJoinTownSubmit(event) {
   }
 }
 
+async function onAutoJoinClick() {
+  if (!joinTownOutput) return;
+  joinTownOutput.textContent = "Auto-joining best town...";
+  persistApiBase();
+  const key = meApiKeyInput.value.trim();
+  if (!key) {
+    joinTownOutput.textContent = "ERROR: missing API key";
+    return;
+  }
+  try {
+    const payload = await apiJson("/api/v1/agents/me/auto-join", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+      },
+    });
+    joinTownOutput.textContent = toPrettyJson(payload);
+    syncTownFields(payload?.membership?.town_id || "");
+    markChecklistStep("join", true);
+    await refreshTowns();
+  } catch (err) {
+    joinTownOutput.textContent = `ERROR: ${err.message}\n${toPrettyJson(err.payload || {})}`;
+  }
+}
+
 async function onLeaveTownClick() {
   if (!joinTownOutput) return;
   joinTownOutput.textContent = "Leaving town...";
@@ -412,10 +481,11 @@ async function onSimTickClick() {
   const parsedSteps = Number.parseInt(simTickStepsInput?.value || "1", 10);
   const steps = Number.isFinite(parsedSteps) && parsedSteps > 0 ? parsedSteps : 1;
   const planningScope = simPlanningScopeInput?.value || "short_action";
+  const controlMode = simControlModeInput?.value || "hybrid";
   try {
     const payload = await apiJson(`/api/v1/sim/towns/${encodeURIComponent(townId)}/tick`, {
       method: "POST",
-      body: { steps, planning_scope: planningScope },
+      body: { steps, planning_scope: planningScope, control_mode: controlMode },
     });
     simOutput.textContent = toPrettyJson(payload);
     markChecklistStep("watch", true);
@@ -507,6 +577,7 @@ function initOnboardingConsole() {
   copyKeyBtn?.addEventListener("click", copyKey);
   joinTownForm?.addEventListener("submit", onJoinTownSubmit);
   leaveTownBtn?.addEventListener("click", onLeaveTownClick);
+  autoJoinBtn?.addEventListener("click", onAutoJoinClick);
   refreshTownsBtn?.addEventListener("click", () => {
     persistApiBase();
     refreshTowns();
