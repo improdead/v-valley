@@ -229,6 +229,7 @@ def town_agent_memory(
 def town_agent_context(
     town_id: str,
     planning_scope: str = Query(default="short_action", pattern=PLANNING_SCOPE_PATTERN),
+    if_unchanged: Optional[str] = Query(default=None, min_length=1, max_length=64),
     authorization: Optional[str] = Header(default=None),
 ) -> dict[str, Any]:
     agent = _require_agent_membership(town_id=town_id, authorization=authorization)
@@ -249,9 +250,17 @@ def town_agent_context(
         members=members,
         agent_id=str(agent["id"]),
         planning_scope=planning_scope,
+        if_unchanged=if_unchanged,
     )
     if context is None:
         raise HTTPException(status_code=404, detail=f"Agent not found in town runtime: {agent['id']}")
+    if context.get("unchanged"):
+        return {
+            "ok": True,
+            "town_id": town_id,
+            "unchanged": True,
+            "context": context,
+        }
     context["autonomy_contract"] = get_agent_autonomy(agent_id=str(agent["id"]))
     return {
         "ok": True,

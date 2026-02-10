@@ -2081,5 +2081,253 @@ class AgentLifecycleTests(unittest.TestCase):
         reset_simulation_states_for_tests()
 
 
+class ContextHashTests(unittest.TestCase):
+    """Tests for context hash / unchanged-poll optimization."""
+
+    def test_context_hash_returned_in_full_response(self) -> None:
+        """Full context response should include a context_hash field."""
+        from packages.vvalley_core.sim.runner import (
+            get_agent_context_snapshot,
+            reset_simulation_states_for_tests,
+        )
+
+        reset_simulation_states_for_tests()
+        active = {"id": "v1", "version": 1, "map_name": "test", "town_id": "t1"}
+        map_data = {
+            "width": 4, "height": 4, "tilewidth": 32, "tileheight": 32,
+            "layers": [{"name": "collision", "data": [0]*16}],
+            "spawns": [{"x": 0, "y": 0}],
+            "locations": [],
+        }
+        members = [{"agent_id": "a1", "name": "Alice"}]
+
+        ctx = get_agent_context_snapshot(
+            town_id="t-hash-1",
+            active_version=active,
+            map_data=map_data,
+            members=members,
+            agent_id="a1",
+        )
+        self.assertIsNotNone(ctx)
+        self.assertIn("context_hash", ctx)
+        self.assertIsInstance(ctx["context_hash"], str)
+        self.assertGreater(len(ctx["context_hash"]), 0)
+        # Full response should NOT have "unchanged" key
+        self.assertNotIn("unchanged", ctx)
+        # Full response should have the expensive "context" key
+        self.assertIn("context", ctx)
+
+        reset_simulation_states_for_tests()
+
+    def test_same_state_same_hash(self) -> None:
+        """Two calls with no state change should return the same hash."""
+        from packages.vvalley_core.sim.runner import (
+            get_agent_context_snapshot,
+            reset_simulation_states_for_tests,
+        )
+
+        reset_simulation_states_for_tests()
+        active = {"id": "v1", "version": 1, "map_name": "test", "town_id": "t1"}
+        map_data = {
+            "width": 4, "height": 4, "tilewidth": 32, "tileheight": 32,
+            "layers": [{"name": "collision", "data": [0]*16}],
+            "spawns": [{"x": 0, "y": 0}],
+            "locations": [],
+        }
+        members = [{"agent_id": "a1", "name": "Alice"}]
+
+        ctx1 = get_agent_context_snapshot(
+            town_id="t-hash-2",
+            active_version=active,
+            map_data=map_data,
+            members=members,
+            agent_id="a1",
+        )
+        ctx2 = get_agent_context_snapshot(
+            town_id="t-hash-2",
+            active_version=active,
+            map_data=map_data,
+            members=members,
+            agent_id="a1",
+        )
+        self.assertEqual(ctx1["context_hash"], ctx2["context_hash"])
+
+        reset_simulation_states_for_tests()
+
+    def test_if_unchanged_returns_minimal_response(self) -> None:
+        """Passing matching if_unchanged should return minimal response."""
+        from packages.vvalley_core.sim.runner import (
+            get_agent_context_snapshot,
+            reset_simulation_states_for_tests,
+        )
+
+        reset_simulation_states_for_tests()
+        active = {"id": "v1", "version": 1, "map_name": "test", "town_id": "t1"}
+        map_data = {
+            "width": 4, "height": 4, "tilewidth": 32, "tileheight": 32,
+            "layers": [{"name": "collision", "data": [0]*16}],
+            "spawns": [{"x": 0, "y": 0}],
+            "locations": [],
+        }
+        members = [{"agent_id": "a1", "name": "Alice"}]
+
+        # First call: get hash
+        ctx1 = get_agent_context_snapshot(
+            town_id="t-hash-3",
+            active_version=active,
+            map_data=map_data,
+            members=members,
+            agent_id="a1",
+        )
+        h = ctx1["context_hash"]
+
+        # Second call: pass hash back
+        ctx2 = get_agent_context_snapshot(
+            town_id="t-hash-3",
+            active_version=active,
+            map_data=map_data,
+            members=members,
+            agent_id="a1",
+            if_unchanged=h,
+        )
+        self.assertTrue(ctx2.get("unchanged"))
+        self.assertEqual(ctx2["context_hash"], h)
+        self.assertIn("step", ctx2)
+        self.assertIn("position", ctx2)
+        # Minimal response should NOT have expensive fields
+        self.assertNotIn("context", ctx2)
+        self.assertNotIn("active_conversation", ctx2)
+        self.assertNotIn("pending_action", ctx2)
+
+        reset_simulation_states_for_tests()
+
+    def test_if_unchanged_stale_hash_returns_full(self) -> None:
+        """Passing a wrong/stale hash should return full context."""
+        from packages.vvalley_core.sim.runner import (
+            get_agent_context_snapshot,
+            reset_simulation_states_for_tests,
+        )
+
+        reset_simulation_states_for_tests()
+        active = {"id": "v1", "version": 1, "map_name": "test", "town_id": "t1"}
+        map_data = {
+            "width": 4, "height": 4, "tilewidth": 32, "tileheight": 32,
+            "layers": [{"name": "collision", "data": [0]*16}],
+            "spawns": [{"x": 0, "y": 0}],
+            "locations": [],
+        }
+        members = [{"agent_id": "a1", "name": "Alice"}]
+
+        ctx = get_agent_context_snapshot(
+            town_id="t-hash-4",
+            active_version=active,
+            map_data=map_data,
+            members=members,
+            agent_id="a1",
+            if_unchanged="stale_hash_value",
+        )
+        self.assertNotIn("unchanged", ctx)
+        self.assertIn("context", ctx)
+        self.assertIn("context_hash", ctx)
+
+        reset_simulation_states_for_tests()
+
+    def test_hash_changes_after_tick(self) -> None:
+        """Hash should change after a tick advances the step counter."""
+        from packages.vvalley_core.sim.runner import (
+            get_agent_context_snapshot,
+            tick_simulation,
+            reset_simulation_states_for_tests,
+        )
+
+        reset_simulation_states_for_tests()
+        active = {"id": "v1", "version": 1, "map_name": "test", "town_id": "t1"}
+        map_data = {
+            "width": 4, "height": 4, "tilewidth": 32, "tileheight": 32,
+            "layers": [{"name": "collision", "data": [0]*16}],
+            "spawns": [{"x": 0, "y": 0}],
+            "locations": [],
+        }
+        members = [{"agent_id": "a1", "name": "Alice"}]
+
+        ctx1 = get_agent_context_snapshot(
+            town_id="t-hash-5",
+            active_version=active,
+            map_data=map_data,
+            members=members,
+            agent_id="a1",
+        )
+        h1 = ctx1["context_hash"]
+
+        # Tick to advance step
+        tick_simulation(
+            town_id="t-hash-5",
+            active_version=active,
+            map_data=map_data,
+            members=members,
+            steps=1,
+            planning_scope="short_action",
+            control_mode="external",
+        )
+
+        ctx2 = get_agent_context_snapshot(
+            town_id="t-hash-5",
+            active_version=active,
+            map_data=map_data,
+            members=members,
+            agent_id="a1",
+        )
+        h2 = ctx2["context_hash"]
+
+        self.assertNotEqual(h1, h2, "Hash should change after tick advances step")
+
+        reset_simulation_states_for_tests()
+
+    def test_hash_changes_when_nearby_agent_appears(self) -> None:
+        """Hash should change when a new agent appears in perception range."""
+        from packages.vvalley_core.sim.runner import (
+            get_agent_context_snapshot,
+            reset_simulation_states_for_tests,
+        )
+
+        reset_simulation_states_for_tests()
+        active = {"id": "v1", "version": 1, "map_name": "test", "town_id": "t1"}
+        map_data = {
+            "width": 10, "height": 10, "tilewidth": 32, "tileheight": 32,
+            "layers": [{"name": "collision", "data": [0]*100}],
+            "spawns": [{"x": 0, "y": 0}, {"x": 1, "y": 0}],
+            "locations": [],
+        }
+        # Start with only Alice
+        members_1 = [{"agent_id": "a1", "name": "Alice"}]
+
+        ctx1 = get_agent_context_snapshot(
+            town_id="t-hash-6",
+            active_version=active,
+            map_data=map_data,
+            members=members_1,
+            agent_id="a1",
+        )
+        h1 = ctx1["context_hash"]
+
+        # Now Bob appears nearby
+        members_2 = [
+            {"agent_id": "a1", "name": "Alice"},
+            {"agent_id": "a2", "name": "Bob"},
+        ]
+        ctx2 = get_agent_context_snapshot(
+            town_id="t-hash-6",
+            active_version=active,
+            map_data=map_data,
+            members=members_2,
+            agent_id="a1",
+        )
+        h2 = ctx2["context_hash"]
+
+        self.assertNotEqual(h1, h2, "Hash should change when nearby agent appears")
+
+        reset_simulation_states_for_tests()
+
+
 if __name__ == "__main__":
     unittest.main()

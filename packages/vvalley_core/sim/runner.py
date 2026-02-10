@@ -2942,6 +2942,56 @@ class SimulationRunner:
             },
         }
 
+    def _compute_context_fingerprint(
+        self, *, town: TownRuntime, npc: NpcState
+    ) -> str:
+        """Compute a lightweight hash of fields that affect agent context.
+
+        When this hash is unchanged between polls, the full context payload
+        would be identical — so the caller can return a tiny "unchanged"
+        response and save the user's LLM token budget.
+        """
+        parts: list[str] = [
+            str(town.step),
+            f"{npc.x},{npc.y}",
+            npc.status or "idle",
+            npc.current_location or "",
+        ]
+
+        # Nearby agents (same lightweight scan as context)
+        for other in town.npcs.values():
+            if other.agent_id == npc.agent_id:
+                continue
+            dist = self._manhattan(npc.x, npc.y, other.x, other.y)
+            if dist <= npc.memory.vision_radius:
+                parts.append(f"n:{other.agent_id}:{other.x},{other.y}:{other.status}")
+
+        # Conversation state
+        session = self._conversation_for_agent(town=town, agent_id=npc.agent_id)
+        if session is not None:
+            parts.append(f"conv:{session.session_id}:{session.turns}:{session.last_step}")
+        else:
+            parts.append("conv:none")
+
+        # Action state
+        pending = town.pending_actions.get(npc.agent_id)
+        active = town.active_actions.get(npc.agent_id)
+        parts.append(f"pa:{1 if pending else 0}")
+        parts.append(f"aa:{1 if active else 0}")
+
+        # Memory node count (append-only, so count change = new memories)
+        parts.append(f"mem:{len(npc.memory.nodes)}")
+
+        # Schedule block index
+        schedule_item, schedule_index, _ = npc.memory.scratch.current_schedule_state(
+            step=town.step,
+            step_minutes=max(1, int(town.step_minutes)),
+        )
+        parts.append(f"sched:{schedule_index if schedule_item else -1}")
+
+        raw = "|".join(parts)
+        return sha256(raw.encode()).hexdigest()[:16]
+
     def get_agent_context(
         self,
         *,
@@ -2951,6 +3001,7 @@ class SimulationRunner:
         members: list[dict[str, Any]],
         agent_id: str,
         planning_scope: str = "short_action",
+        if_unchanged: str | None = None,
     ) -> dict[str, Any] | None:
         runtime = self.sync_town(
             town_id=town_id,
@@ -2961,6 +3012,26 @@ class SimulationRunner:
         npc = runtime.npcs.get(str(agent_id))
         if not npc:
             return None
+
+        context_hash = self._compute_context_fingerprint(town=runtime, npc=npc)
+
+        # Fast path: context unchanged — return minimal response
+        if if_unchanged and if_unchanged == context_hash:
+            return {
+                "unchanged": True,
+                "town_id": runtime.town_id,
+                "step": runtime.step,
+                "clock": self._clock_for_runtime(town=runtime),
+                "agent": {
+                    "agent_id": npc.agent_id,
+                    "name": npc.name,
+                    "current_location": npc.current_location,
+                    "status": npc.status,
+                },
+                "position": {"x": npc.x, "y": npc.y},
+                "context_hash": context_hash,
+            }
+
         pending = runtime.pending_actions.get(npc.agent_id)
         active = runtime.active_actions.get(npc.agent_id)
         pending_clean = self._clean_action_for_output(pending)
@@ -2984,6 +3055,7 @@ class SimulationRunner:
             "active_conversation": self._conversation_context_for_agent(town=runtime, npc=npc),
             "pending_action": pending_clean,
             "active_action": active_clean,
+            "context_hash": context_hash,
         }
 
     def submit_agent_action(
@@ -4022,6 +4094,7 @@ def get_agent_context_snapshot(
     members: list[dict[str, Any]],
     agent_id: str,
     planning_scope: str = "short_action",
+    if_unchanged: str | None = None,
 ) -> dict[str, Any] | None:
     lock = _acquire_town_or_raise(town_id)
     try:
@@ -4032,6 +4105,7 @@ def get_agent_context_snapshot(
             members=members,
             agent_id=agent_id,
             planning_scope=planning_scope,
+            if_unchanged=if_unchanged,
         )
     finally:
         lock.release()
