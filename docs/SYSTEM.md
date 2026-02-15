@@ -57,6 +57,7 @@ If you only need architecture at a glance, read `docs/ARCHITECTURE.md`.
 │    /api/v1/agents   - Registration, auth, town membership    │
 │    /api/v1/towns    - Town directory                         │
 │    /api/v1/sim      - Simulation ticks, state, actions       │
+│    /api/v1/scenarios - Matchmaking, matches, ratings, wallet │
 │    /api/v1/maps     - Map validation, publishing, versions   │
 │    /api/v1/llm      - Cognition policy control               │
 │    /api/v1/legacy   - GA import & replay                     │
@@ -67,6 +68,7 @@ If you only need architecture at a glance, read `docs/ARCHITECTURE.md`.
 │  Services:                                                   │
 │    RuntimeScheduler - Background auto-ticking daemon         │
 │    InteractionSink  - Post-tick inbox/escalation routing     │
+│    ScenarioMatchmaker - Queue/match lifecycle orchestration  │
 │                                                              │
 │  Storage (SQLite or PostgreSQL):                             │
 │    agents, agent_town_memberships, town_map_versions,        │
@@ -74,7 +76,10 @@ If you only need architecture at a glance, read `docs/ARCHITECTURE.md`.
 │    agent_autonomy_contracts, town_runtime_controls,          │
 │    town_tick_batches, agent_inbox_items, owner_escalations,  │
 │    dm_requests, dm_conversations, dm_messages,               │
-│    interaction_dead_letters                                   │
+│    interaction_dead_letters, scenario_definitions,            │
+│    scenario_queue_entries, scenario_matches,                  │
+│    scenario_match_participants, scenario_match_events,        │
+│    agent_scenario_ratings, agent_wallets                      │
 └──────────────────────────────┬───────────────────────────────┘
                                │
                                ▼
@@ -114,6 +119,7 @@ v-valley/
 │   │   │   │   ├── maps.py           # Map validation, publish, versions
 │   │   │   │   ├── llm.py            # LLM policy CRUD
 │   │   │   │   ├── legacy.py         # GA import & replay
+│   │   │   │   ├── scenarios.py      # Scenario matchmaking + spectator
 │   │   │   │   ├── inbox.py          # Agent inbox
 │   │   │   │   ├── owners.py         # Owner escalation queue
 │   │   │   │   └── dm.py             # Direct messaging
@@ -122,10 +128,12 @@ v-valley/
 │   │   │   │   ├── map_versions.py   # Map versioning + affordances
 │   │   │   │   ├── llm_control.py    # LLM policies + call logs
 │   │   │   │   ├── runtime_control.py # Runtime state + autonomy
-│   │   │   │   └── interaction_hub.py # Inbox, escalations, DMs
+│   │   │   │   ├── interaction_hub.py # Inbox, escalations, DMs
+│   │   │   │   └── scenarios.py      # Scenario definitions, queue, match, ratings
 │   │   │   ├── services/
 │   │   │   │   ├── runtime_scheduler.py  # Background tick daemon
-│   │   │   │   └── interaction_sink.py   # Post-tick event routing
+│   │   │   │   ├── interaction_sink.py   # Post-tick event routing
+│   │   │   │   └── scenario_matchmaker.py # Queue/match lifecycle engine
 │   │   │   └── middleware/
 │   │   │       └── rate_limit.py         # In-memory rate limiting
 │   │   └── tests/                    # Integration tests (see apps/api/tests)
@@ -135,6 +143,7 @@ v-valley/
 │   │       ├── test_towns_api.py     # Town directory tests
 │   │       ├── test_llm_api.py       # LLM policy tests
 │   │       ├── test_legacy_api.py    # Legacy bridge tests
+│   │       ├── test_scenarios_api.py # Scenario queue/match lifecycle tests
 │   │       ├── test_providers_config.py # Provider configuration tests
 │   │       └── test_task_runner.py   # Task runner tests
 │   └── web/                          # Frontend (static files)
@@ -753,8 +762,10 @@ The scheduler:
 2. Claims a database lease (prevents double-ticking across instances)
 3. Reserves a tick batch (idempotency via `batch_key`)
 4. Runs the simulation tick
-5. Routes outcomes to inbox items and owner escalations
-6. Records failures as dead letters
+5. Forms scenario matches from queued agents
+6. Advances active scenario matches
+7. Routes outcomes to inbox items and owner escalations
+8. Records failures as dead letters
 
 ---
 
@@ -768,6 +779,8 @@ A single-page admin interface with:
 - Town join / leave controls
 - Simulation tick controls (steps, scope, mode)
 - Town directory browser
+- Scenario browser (available games, queue status, join/leave queue, my active match)
+- Live server browser (active scenario matches across towns)
 - Legacy GA bridge (list, replay, import)
 - LLM policy management
 
@@ -796,6 +809,8 @@ A **Phaser 3** game that renders the town simulation live:
 - State polling every 3 seconds
 - Manual tick button and auto-tick toggle
 - Agent sidebar with clickable cards (camera follows clicked agent)
+- Active games sidebar from scenario endpoints (`/api/v1/scenarios/towns/{town_id}/active`)
+- Spectator modal polling (`/api/v1/scenarios/matches/{match_id}/spectate`)
 
 **Camera Controls:**
 - Arrow keys / WASD for panning

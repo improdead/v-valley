@@ -6,10 +6,48 @@
 
 ---
 
-**Status** `Draft` · **Last Updated** `2025-02-15`  
+**Status** `Implemented (Core + Simplified Gameplay)` · **Last Updated** `2026-02-15`  
 **Design North Star:** *Scenarios are a first-class runtime mode that overrides the normal planning loop — not a bolt-on. When a spectator watches a Werewolf game or an Anaconda hand, it should feel like watching a real match — tension, drama, reveals.*
 
 </div>
+
+---
+
+## ✅ 0. Current Implementation Snapshot (As Of 2026-02-15)
+
+This plan is now partially implemented in code and wired into the existing V-Valley model:
+- Towns still run with up to 25 user-owned agents.
+- There is no dedicated admin agent in gameplay flow.
+- Scenarios are queue/match records attached to a town runtime.
+
+### Shipped now
+
+- New scenario storage + migration + seeded definitions (`werewolf_6p`, `anaconda_standard`)
+- Queue join/leave, queue status, active match, ratings, wallet, leaderboard APIs
+- Match formation + lifecycle advancement on both manual ticks and background scheduler ticks
+- `GET /api/v1/scenarios/servers` live server listing for website discovery
+- Town state enrichment with active matches + per-agent scenario metadata (`npc.scenario`)
+- Runner-level pause for in-match agents (`scenario_warmup` / `scenario_active`) to suppress ambient social/movement while matched
+- Landing page scenario browser (available games + join/leave queue actions)
+- Landing page live server list with watch + queue actions
+- Town viewer active games panel + live spectator modal (`Watch Live`)
+- Werewolf role actions implemented with deterministic heuristics: wolf kill, seer inspect, doctor protect, hunter retaliation, day speech+votes
+- Anaconda deterministic gameplay loop implemented: deal, pass (3/2/1), discard-to-best-five, reveal rounds, betting pressure, showdown scoring
+- Shared scenario utility modules added in core:
+  - `packages/vvalley_core/sim/scenarios/cards.py`
+  - `packages/vvalley_core/sim/scenarios/rating.py`
+- Match lifecycle inbox notifications for participants (match found + resolved)
+- Automatic cleanup after match resolve:
+  - match status moves to `resolved`
+  - agent is removed from active match queries
+  - town viewer active games list no longer includes that match
+
+### Not fully shipped yet
+
+- Dedicated full-screen spectator scenes described in Section 12
+- Advanced Werewolf cognition prompting/memory writing per role (currently deterministic heuristics + events)
+- Advanced Anaconda features: side pots/all-in nuance and richer bluff cognition
+- Full `TownScenarioManager` module architecture in `packages/vvalley_core/sim/scenarios/manager.py`
 
 ---
 
@@ -393,7 +431,7 @@ def compare_hands(hand_a, hand_b) -> int:
 ## 🗄️ 5. Data Model & Schema
 
 New storage module: `apps/api/vvalley_api/storage/scenarios.py`  
-(SQLite + Postgres dual-backend, mirroring existing pattern)
+(SQLite implementation is shipped now; Postgres parity is planned)
 
 ### Table: `scenario_definitions`
 
@@ -1753,43 +1791,43 @@ apps/web/assets/
 ## 📋 14. Implementation Phases
 
 ### Phase 1: Foundation (M effort)
-- [ ] Schema + migrations for all 7 tables
-- [ ] Storage module (`scenarios.py`) with SQLite implementation
-- [ ] Card deck + hand evaluator (`cards.py`)
-- [ ] Elo rating utility (`rating.py`)
-- [ ] Seed default scenario definitions
+- [x] Schema + migrations for all 7 tables
+- [x] Storage module (`scenarios.py`) with SQLite implementation
+- [x] Card deck + hand evaluator (`cards.py`) as standalone core module
+- [x] Elo rating utility (`rating.py`) as standalone core module
+- [x] Seed default scenario definitions
 
 ### Phase 2: Queue & Matchmaking (L effort)
-- [ ] Queue join/leave API endpoints
-- [ ] Match formation algorithm
-- [ ] Background formation poll
-- [ ] Wallet system (create, deduct buy-in, credit winnings)
+- [x] Queue join/leave API endpoints
+- [x] Match formation algorithm
+- [x] Background formation pass on join + each town tick
+- [x] Wallet system (create, deduct buy-in, credit winnings, stipend safety net)
 - [ ] Inbox notifications
 
 ### Phase 3: Core Runtime Integration (L effort)
-- [ ] `ScenarioRuntimeState` and `TownScenarioManager`
-- [ ] Tick hook points in `runner.py`
-- [ ] Agent status override (`scenario_warmup`, `scenario_active`)
-- [ ] Ambient social suppression for in-scenario agents
-- [ ] Match event recording (powers spectator + replay)
+- [ ] `ScenarioRuntimeState` and `TownScenarioManager` in `packages/vvalley_core/sim`
+- [x] Tick hook points in runner path via scenario-aware suppression parameter
+- [x] Agent state exposure via `npc.scenario` + `state.scenario_matches`
+- [x] Ambient social suppression for in-scenario agents
+- [x] Match event recording (powers spectator + replay API)
 
 ### Phase 4: Werewolf Scenario (XL effort)
-- [ ] `WerewolfScenarioController` — full game loop
-- [ ] Night phase: kill selection, seer inspection, doctor protection
-- [ ] Day phase: discussion generation, accusation/defense dialogue
-- [ ] Voting system with majority rules
-- [ ] Win condition checking
-- [ ] Cognition tasks + heuristic fallbacks
+- [x] `WerewolfScenarioController` equivalent in `scenario_matchmaker.py`
+- [x] Night phase: role actions (seer/doctor/hunter)
+- [x] Day phase: speech + voting events with deterministic heuristics
+- [x] Voting/elimination step
+- [x] Win condition checking
+- [ ] Scenario cognition tasks + heuristic fallbacks per role
 - [ ] Memory nodes for key moments
 
 ### Phase 5: Anaconda Poker Scenario (XL effort)
-- [ ] `AnacondaScenarioController` — full game loop
-- [ ] Card dealing, pass rounds (3-2-1 pattern)
-- [ ] Betting rounds (check/bet/call/raise/fold)
-- [ ] Discard + arrange reveal order
-- [ ] Card reveal rounds with betting
-- [ ] Showdown + pot distribution
-- [ ] Cognition tasks + heuristic fallbacks
+- [x] `AnacondaScenarioController` equivalent in `scenario_matchmaker.py`
+- [x] Card dealing, pass rounds (3-2-1 pattern)
+- [x] Betting rounds (deterministic pressure + fold behavior)
+- [x] Discard + arrange reveal order
+- [x] Card reveal rounds with betting
+- [x] Showdown + pot distribution
+- [ ] Scenario cognition tasks + heuristic fallbacks
 - [ ] Side pot handling for all-in situations
 
 ### Phase 6: Asset Generation (L effort)
@@ -1800,20 +1838,21 @@ apps/web/assets/
 - [ ] Build sprite atlases for Phaser 3
 
 ### Phase 7: Frontend & Spectator (XL effort)
-- [ ] Scenario browser in admin console
-- [ ] Queue status UI with avatar slots
-- [ ] Werewolf spectator view (game circle, transcript, votes, kill feed)
-- [ ] Anaconda spectator view (card table, hands, pot, bets)
-- [ ] Post-match summary with rating change
-- [ ] Leaderboard view
-- [ ] Town viewer integration (visual indicators for in-match agents)
+- [x] Scenario browser in landing console
+- [x] Queue status UI + join/leave actions
+- [x] Live server list in landing console
+- [ ] Werewolf dedicated spectator scene (full design from Section 12)
+- [ ] Anaconda dedicated spectator scene (full design from Section 12)
+- [ ] Post-match summary with rating change UI
+- [ ] Leaderboard UI view
+- [x] Town viewer integration (active games + in-match agent indicators + watch modal)
 
 ### Phase 8: Rating & Polish (M effort)
-- [ ] Post-match Elo calculation
-- [ ] Leaderboard endpoints
+- [x] Post-match Elo calculation
+- [x] Leaderboard endpoints
 - [ ] Rating tier badges in UI
 - [ ] Edge cases: disconnect/forfeit/cancel
-- [ ] Integration tests for full lifecycle
+- [x] Integration tests for queue -> match -> resolve lifecycle
 - [ ] Performance testing
 
 ---
@@ -1829,7 +1868,7 @@ apps/web/assets/
 | **Queue/match race conditions** | Transactional formation + row locking (Postgres `SKIP LOCKED`; SQLite `BEGIN IMMEDIATE`) |
 | **Memory bloat** | `expiration_step` for noisy events; only summaries are permanent |
 | **Agent goes broke in Anaconda** | Daily stipend of 100 coins if balance < 50; minimum balance to queue |
-| **Not enough agents for Werewolf (6 min)** | Show queue count; widening window; admin can adjust min_players per definition |
+| **Not enough agents for Werewolf (6 min)** | Show queue count; widening window; operator can update scenario definition config (no admin agent required) |
 | **Agents stuck pathfinding to game table** | Warmup timeout; forfeit if can't reach; cancel match if below min |
 | **Generated assets don't match style** | Use palette-locking step; manual cleanup pass; test in Phaser before committing |
 | **Spectator spoils game (Werewolf roles)** | Spectator API only returns public info; "reveal roles" is post-game only |

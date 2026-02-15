@@ -1266,13 +1266,22 @@ class SimulationRunner:
         idx = self._hash_int(f"social_chat:{a.agent_id}:{b.agent_id}:{step}") % len(variants)
         return variants[idx]
 
-    def _build_social_events(self, *, town: TownRuntime, step: int) -> list[dict[str, Any]]:
+    def _build_social_events(
+        self,
+        *,
+        town: TownRuntime,
+        step: int,
+        blocked_agent_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
         npcs = sorted(town.npcs.values(), key=lambda n: n.agent_id)
         out: list[dict[str, Any]] = []
+        blocked = blocked_agent_ids or set()
         for i in range(len(npcs)):
             for j in range(i + 1, len(npcs)):
                 a = npcs[i]
                 b = npcs[j]
+                if a.agent_id in blocked or b.agent_id in blocked:
+                    continue
                 if not self._adjacent(a, b):
                     continue
                 if self._chat_buffer_pair_active(a=a, b=b, step=step):
@@ -2573,12 +2582,22 @@ class SimulationRunner:
             "conversation_session_id": session.session_id,
         }
 
-    def _build_conversation_continuation_events(self, *, town: TownRuntime, step: int) -> list[dict[str, Any]]:
+    def _build_conversation_continuation_events(
+        self,
+        *,
+        town: TownRuntime,
+        step: int,
+        blocked_agent_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         self._prune_conversations(town=town, step=step)
+        blocked = blocked_agent_ids or set()
         for session_id in sorted(town.conversation_sessions.keys()):
             session = town.conversation_sessions.get(session_id)
             if session is None:
+                continue
+            if session.agent_a in blocked or session.agent_b in blocked:
+                self._end_conversation_session(town=town, session_id=session_id, end_step=step)
                 continue
             if session.last_step >= int(step):
                 continue
@@ -3949,6 +3968,7 @@ class SimulationRunner:
         planner: Optional[PlannerFn] = None,
         agent_autonomy: dict[str, dict[str, Any]] | None = None,
         cognition_planner: Any = None,
+        scenario_agent_statuses: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         runtime = self.sync_town(
             town_id=town_id,
@@ -3968,18 +3988,50 @@ class SimulationRunner:
         social_events: list[dict[str, Any]] = []
         reflection_events: list[dict[str, Any]] = []
         clamped_steps = max(1, int(steps))
+        normalized_scenario_statuses: dict[str, str] = {}
+        if isinstance(scenario_agent_statuses, dict):
+            for raw_agent_id, raw_status in scenario_agent_statuses.items():
+                agent_id = str(raw_agent_id or "").strip()
+                status = str(raw_status or "").strip()
+                if agent_id and status:
+                    normalized_scenario_statuses[agent_id] = status
 
         for _ in range(clamped_steps):
             runtime.step += 1
             self._prune_conversations(town=runtime, step=runtime.step)
             step_external_social_events: list[dict[str, Any]] = []
             step_conversation_locks = self._conversation_locks(town=runtime)
+            blocked_agents = {agent_id for agent_id in normalized_scenario_statuses if agent_id in runtime.npcs}
+
+            if blocked_agents:
+                for session_id in list(runtime.conversation_sessions.keys()):
+                    session = runtime.conversation_sessions.get(session_id)
+                    if session is None:
+                        continue
+                    if session.agent_a in blocked_agents or session.agent_b in blocked_agents:
+                        self._end_conversation_session(town=runtime, session_id=session_id, end_step=runtime.step)
 
             for agent_id in sorted(runtime.npcs.keys()):
                 npc = runtime.npcs[agent_id]
                 self._prune_chat_buffer(npc=npc, step=runtime.step)
                 self._update_location_memory(town=runtime, npc=npc, step=runtime.step)
                 self._perceive_spatial_tiles(town=runtime, npc=npc, step=runtime.step)
+
+                scenario_status = normalized_scenario_statuses.get(agent_id)
+                if scenario_status:
+                    runtime.pending_actions.pop(agent_id, None)
+                    runtime.active_actions.pop(agent_id, None)
+                    runtime.autonomy_tick_counts[agent_id] = 0
+                    self._clear_social_wait(town=runtime, agent_id=agent_id)
+                    npc.status = scenario_status
+                    npc.goal_reason = scenario_status
+                    npc.last_step = runtime.step
+                    self._apply_physiology_tick(
+                        npc=npc,
+                        moved=False,
+                        action_description=scenario_status,
+                    )
+                    continue
 
                 submitted_action: dict[str, Any] | None = None
                 active_action: dict[str, Any] | None = runtime.active_actions.get(agent_id)
@@ -5004,11 +5056,23 @@ class SimulationRunner:
 
             step_social_events: list[dict[str, Any]] = []
             if mode in {"autopilot", "hybrid"}:
-                step_social_events.extend(self._build_social_events(town=runtime, step=runtime.step))
+                step_social_events.extend(
+                    self._build_social_events(
+                        town=runtime,
+                        step=runtime.step,
+                        blocked_agent_ids=blocked_agents,
+                    )
+                )
             if step_external_social_events:
                 step_social_events.extend(step_external_social_events)
             if mode in {"autopilot", "hybrid"}:
-                step_social_events.extend(self._build_conversation_continuation_events(town=runtime, step=runtime.step))
+                step_social_events.extend(
+                    self._build_conversation_continuation_events(
+                        town=runtime,
+                        step=runtime.step,
+                        blocked_agent_ids=blocked_agents,
+                    )
+                )
             if len(step_social_events) > self.max_social_events_per_step:
                 step_social_events = step_social_events[: self.max_social_events_per_step]
 
@@ -5224,6 +5288,7 @@ def tick_simulation(
     planner: Optional[PlannerFn] = None,
     agent_autonomy: dict[str, dict[str, Any]] | None = None,
     cognition_planner: Any = None,
+    scenario_agent_statuses: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     lock = _lock_for_town(town_id)
     lock.acquire()  # blocking — ticks should wait
@@ -5239,6 +5304,7 @@ def tick_simulation(
             planner=planner,
             agent_autonomy=agent_autonomy,
             cognition_planner=cognition_planner,
+            scenario_agent_statuses=scenario_agent_statuses,
         )
     finally:
         lock.release()

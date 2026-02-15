@@ -6,7 +6,7 @@
 
 ---
 
-**Status** `Draft` · **Last Updated** `2025-02-15`  
+**Status** `Implemented (P0 Core + Partial P1)` · **Last Updated** `2026-02-15`  
 **Design North Star:** *When a spectator opens the town viewer, they should feel like they're peering through the window of a tiny living world — not polling a dashboard.*
 
 </div>
@@ -17,7 +17,7 @@
 
 Right now, opening the Town Viewer feels like opening a monitoring tool. Agents silently slide around the map. Conversations show `agent_abc123 & agent_def456` instead of names. There's no narrative — no sense of *what just happened* or *why it matters*. The map doesn't breathe. No day/night, no speech, no story.
 
-We can fix all of this without touching the backend.
+Most of this can be fixed on the frontend, with small backend additions for scenario match visibility.
 
 ---
 
@@ -28,6 +28,32 @@ We can fix all of this without touching the backend.
 | 🔴 **P0** | Must-have — the viewer feels broken without it |
 | 🟡 **P1** | Should-have — significant experience upgrade |
 | 🟢 **P2** | Nice-to-have — polish and delight |
+
+---
+
+## ✅ Current Implementation Snapshot (As Of 2026-02-15)
+
+### Shipped now
+
+- Live event feed with client-side diffing and ring buffer
+- On-map speech/thought bubbles (conversation lines + pronunciatio updates)
+- Phaser lifecycle cleanup on town switch
+- Overlapping poll prevention + stronger `apiFetch` error handling
+- Connection health indicator (`Connected` / `Polling` / `Disconnected`)
+- Conversation cards now show agent names (not raw IDs)
+- Day/night visual overlay tied to simulation clock
+- Active games section in sidebar with `Watch Live` spectator modal
+- Scenario markers on agent cards and map labels for in-match agents
+- Zoom controls (`+` / `-`) and responsive layout improvements
+- Landing-page town card deep-link fix (`town.html?api=...&town=...`)
+
+### Still pending from this plan
+
+- Conversation transcript detail modal
+- Agent detail drawer with memory/relationship deep dive
+- Full location interaction layer from Tiled location objects
+- SSE streaming replacement for polling
+- Relationship graph, replay/rewind, richer ambient polish
 
 ---
 
@@ -689,26 +715,26 @@ Fading trail of recent positions for the selected agent:
 
 ## ✦ Implementation Priority — The Roadmap
 
-| # | Feature | Priority | Effort | Why It Matters |
-|:---:|---|:---:|:---:|---|
-| 1 | Fix Phaser lifecycle leak + poll overlap | 🔴 P0 | S | **Prevents crashes** on town switch |
-| 2 | Fix `apiFetch` error handling | 🔴 P0 | S | **Prevents silent failures** |
-| 3 | Show agent names in conversations | 🔴 P0 | S | **Basic correctness** — IDs are unreadable |
-| 4 | Reduce DOM churn (hash-based rebuild) | 🔴 P0 | S | **Stops scroll-jank** during polling |
-| 5 | Live event feed | 🔴 P0 | M | **Transforms** the viewer from dashboard to narrative |
-| 6 | On-map speech bubbles | 🔴 P0 | M | **Makes the map feel alive** |
-| 7 | Connection status indicator | 🔴 P0 | S | Spectators need to know the stream is live |
-| 8 | Town card navigation fix | 🟡 P1 | S | Fixes broken click-through flow |
-| 9 | Day/night visual cycle | 🟡 P1 | S | Atmospheric polish — the world breathes |
-| 10 | Conversation transcript modal | 🟡 P1 | M | Narrative depth — read the actual dialogue |
-| 11 | Mobile responsive styles | 🟡 P1 | M | Accessibility for all devices |
-| 12 | Agent detail drawer | 🟡 P1 | L | Deep engagement with individual characters |
-| 13 | Map interaction (locations + sprites) | 🟡 P1 | L | Spatial understanding + discoverability |
-| 14 | Landing page polish | 🟡 P1 | S | First impressions count |
-| 15 | Zoom UI buttons | 🟢 P2 | S | Mobile zoom without scroll wheel |
-| 16 | Ambient day/night particles | 🟢 P2 | M | Atmospheric delight |
-| 17 | Relationship graph | 🟢 P2 | L | Social insight visualization |
-| 18 | SSE real-time updates | 🟢 P2 | XL | Architecture-level upgrade |
+| # | Feature | Status | Priority | Effort | Why It Matters |
+|:---:|---|:---:|:---:|:---:|---|
+| 1 | Fix Phaser lifecycle leak + poll overlap | ✅ Done | 🔴 P0 | S | **Prevents crashes** on town switch |
+| 2 | Fix `apiFetch` error handling | ✅ Done | 🔴 P0 | S | **Prevents silent failures** |
+| 3 | Show agent names in conversations | ✅ Done | 🔴 P0 | S | **Basic correctness** — IDs are unreadable |
+| 4 | Reduce DOM churn (hash-based rebuild) | ✅ Done | 🔴 P0 | S | **Stops scroll-jank** during polling |
+| 5 | Live event feed | ✅ Done | 🔴 P0 | M | **Transforms** the viewer from dashboard to narrative |
+| 6 | On-map speech bubbles | ✅ Done | 🔴 P0 | M | **Makes the map feel alive** |
+| 7 | Connection status indicator | ✅ Done | 🔴 P0 | S | Spectators need to know the stream is live |
+| 8 | Town card navigation fix | ✅ Done | 🟡 P1 | S | Fixes broken click-through flow |
+| 9 | Day/night visual cycle | ✅ Done | 🟡 P1 | S | Atmospheric polish — the world breathes |
+| 10 | Conversation transcript modal | ⏳ Planned | 🟡 P1 | M | Narrative depth — read the actual dialogue |
+| 11 | Mobile responsive styles | ✅ Done | 🟡 P1 | M | Accessibility for all devices |
+| 12 | Agent detail drawer | ⏳ Planned | 🟡 P1 | L | Deep engagement with individual characters |
+| 13 | Map interaction (locations + sprites) | 🟨 Partial | 🟡 P1 | L | Spatial understanding + discoverability |
+| 14 | Landing page polish | 🟨 Partial | 🟡 P1 | S | First impressions count |
+| 15 | Zoom UI buttons | ✅ Done | 🟢 P2 | S | Mobile zoom without scroll wheel |
+| 16 | Ambient day/night particles | ⏳ Planned | 🟢 P2 | M | Atmospheric delight |
+| 17 | Relationship graph | ⏳ Planned | 🟢 P2 | L | Social insight visualization |
+| 18 | SSE real-time updates | ⏳ Planned | 🟢 P2 | XL | Architecture-level upgrade |
 
 ---
 
