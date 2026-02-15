@@ -144,6 +144,25 @@
       font-variant-numeric: tabular-nums;
     }
 
+    .conn-wrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: 8px;
+      font-size: 14px;
+      color: var(--text-dim);
+    }
+    .conn-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      border: 1px solid #091525;
+      background: #667788;
+    }
+    .conn-dot.ok { background: var(--accent-green); }
+    .conn-dot.warn { background: var(--accent-gold); }
+    .conn-dot.err { background: var(--accent-red); }
+
     /* ── Main layout ── */
     .main-layout {
       display: flex;
@@ -180,6 +199,13 @@
       border-bottom: 2px dashed var(--border-color);
       margin-bottom: 4px;
       text-shadow: 0 0 6px rgba(83, 216, 251, 0.2);
+    }
+
+    .sidebar-section {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 6px;
     }
 
     /* ── Agent cards ── */
@@ -275,6 +301,220 @@
       color: var(--text-dim);
       font-style: italic;
     }
+    .convo-meta {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    .agent-scenario-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      color: var(--accent-gold);
+      border: 1px solid var(--border-color);
+      background: rgba(255, 213, 107, 0.08);
+      padding: 1px 4px;
+      margin-bottom: 5px;
+    }
+
+    /* ── Event feed ── */
+    .event-feed {
+      max-height: 220px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding-right: 2px;
+    }
+    .event-item {
+      text-align: left;
+      width: 100%;
+      cursor: pointer;
+      border: 2px solid var(--border-color);
+      background: linear-gradient(180deg, var(--bg-card) 0%, #162840 100%);
+      padding: 8px;
+      color: var(--text);
+      font-family: var(--font-body);
+    }
+    .event-item .event-title {
+      font-size: 14px;
+      color: #e8f4ff;
+      margin-bottom: 2px;
+    }
+    .event-item .event-detail {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .event-item.social { border-left: 3px solid var(--accent-purple); }
+    .event-item.movement { border-left: 3px solid var(--accent-cyan); }
+    .event-item.arrival { border-left: 3px solid var(--accent-green); }
+    .event-item.goal { border-left: 3px solid var(--accent-gold); }
+    .new-events-pill {
+      display: none;
+      align-self: flex-end;
+      border: 1px solid var(--border-color);
+      background: var(--bg-card);
+      color: var(--accent-cyan);
+      font-size: 12px;
+      padding: 3px 8px;
+      cursor: pointer;
+    }
+
+    /* ── Active games ── */
+    .match-card {
+      border: 2px solid var(--border-color);
+      background: linear-gradient(180deg, var(--bg-card) 0%, #162840 100%);
+      padding: 8px;
+      position: relative;
+    }
+    .match-card::before {
+      content: "";
+      position: absolute;
+      top: 0; left: 0;
+      width: 3px; height: 100%;
+      background: var(--accent-gold);
+    }
+    .match-title {
+      margin-left: 6px;
+      color: var(--accent-gold);
+      font-family: var(--font-pixel);
+      font-size: 0.38rem;
+      letter-spacing: 0.02em;
+      margin-bottom: 4px;
+    }
+    .match-meta {
+      margin-left: 6px;
+      font-size: 13px;
+      color: var(--text-dim);
+      margin-bottom: 6px;
+    }
+    .match-watch-btn {
+      margin-left: 6px;
+      font-size: 12px;
+      color: var(--text);
+      border: 1px solid var(--border-color);
+      background: #193457;
+      padding: 3px 8px;
+      cursor: pointer;
+    }
+    .match-watch-btn:hover {
+      border-color: var(--accent-gold);
+      color: var(--accent-gold);
+    }
+
+    .match-toast {
+      position: fixed;
+      top: 56px; right: 16px;
+      background: linear-gradient(180deg, var(--bg-card) 0%, #162840 100%);
+      border: 2px solid var(--accent-gold);
+      padding: 10px 12px;
+      font-family: var(--font-pixel);
+      font-size: 0.38rem;
+      color: var(--accent-gold);
+      z-index: 200;
+      box-shadow: 4px 4px 0 rgba(0,0,0,0.4);
+    }
+
+    /* ── Zoom controls ── */
+    .zoom-controls {
+      position: absolute;
+      right: 10px;
+      bottom: 10px;
+      z-index: 40;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .zoom-controls button {
+      width: 34px;
+      height: 34px;
+      border: 2px solid var(--border-color);
+      background: var(--bg-card);
+      color: var(--text);
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .zoom-controls button:hover {
+      border-color: var(--accent-cyan);
+      color: var(--accent-cyan);
+    }
+
+    /* ── Spectator modal ── */
+    .match-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(5, 10, 18, 0.78);
+      z-index: 300;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .match-modal-card {
+      width: min(920px, 96vw);
+      max-height: 88vh;
+      overflow: hidden;
+      border: var(--pixel-border);
+      background: linear-gradient(180deg, var(--bg-panel) 0%, #111d30 100%);
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+    }
+    .match-modal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 2px solid var(--border-color);
+      padding: 10px 12px;
+      font-family: var(--font-pixel);
+      font-size: 0.42rem;
+      color: var(--accent-gold);
+    }
+    .match-modal-head button {
+      border: 1px solid var(--border-color);
+      background: var(--bg-card);
+      color: var(--text);
+      font-size: 14px;
+      padding: 2px 8px;
+      cursor: pointer;
+    }
+    .match-modal-phase {
+      border-bottom: 2px dashed var(--border-color);
+      padding: 8px 12px;
+      color: var(--text-dim);
+      font-size: 14px;
+    }
+    .match-modal-grid {
+      display: grid;
+      grid-template-columns: 1fr 1.5fr;
+      gap: 0;
+      min-height: 0;
+    }
+    .match-modal-panel {
+      min-height: 0;
+      overflow: auto;
+      padding: 10px 12px;
+      border-right: 1px solid var(--border-color);
+    }
+    .match-modal-panel:last-child {
+      border-right: none;
+    }
+    .match-player-row {
+      font-size: 14px;
+      color: var(--text);
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    .match-event-row {
+      font-size: 13px;
+      color: var(--text-dim);
+      padding: 3px 0;
+      border-bottom: 1px dotted rgba(255,255,255,0.08);
+      word-break: break-word;
+    }
 
     /* ── Empty state ── */
     .empty-state {
@@ -338,6 +578,38 @@
       background: var(--accent-red);
       color: #fff;
     }
+
+    @media (max-width: 900px) {
+      .topbar {
+        flex-wrap: wrap;
+        height: auto;
+        gap: 6px;
+        padding: 8px;
+      }
+      .main-layout {
+        flex-direction: column;
+        height: calc(100vh - 92px);
+      }
+      #game-container {
+        height: 56vh;
+      }
+      .sidebar {
+        width: 100%;
+        height: 44vh;
+        border-left: none;
+        border-top: var(--pixel-border);
+      }
+      .match-modal-grid {
+        grid-template-columns: 1fr;
+      }
+      .match-modal-panel {
+        border-right: none;
+        border-bottom: 1px solid var(--border-color);
+      }
+      .match-modal-panel:last-child {
+        border-bottom: none;
+      }
+    }
   </style>
 </head>
 <body>
@@ -367,23 +639,72 @@
     <div class="spacer"></div>
     <span class="game-time" id="gameTime">--:--</span>
     <span class="step-count" id="stepCount">step --</span>
+    <span class="conn-wrap"><span class="conn-dot" id="connDot"></span><span id="connLabel">Disconnected</span></span>
   </div>
 
   <div class="main-layout">
     <div id="game-container">
       <div id="loading-overlay">Select a town to begin</div>
+      <div class="zoom-controls">
+        <button id="zoomIn" title="Zoom in">+</button>
+        <button id="zoomOut" title="Zoom out">−</button>
+      </div>
     </div>
     <div class="sidebar" id="sidebar">
-      <h3>Agents</h3>
-      <div id="agentList">
-        <div class="empty-state">
-          <p>No agents yet</p>
+      <div class="sidebar-section">
+        <h3>Events</h3>
+        <div id="eventFeed" class="event-feed">
+          <div class="empty-state">
+            <p>No events yet</p>
+          </div>
+        </div>
+        <button id="eventFeedNew" class="new-events-pill">↓ New events</button>
+      </div>
+
+      <div class="sidebar-section">
+        <h3>Agents</h3>
+        <div id="agentList">
+          <div class="empty-state">
+            <p>No agents yet</p>
+          </div>
         </div>
       </div>
-      <h3>Conversations</h3>
-      <div id="convoList">
-        <div class="empty-state">
-          <p>No active conversations</p>
+
+      <div class="sidebar-section">
+        <h3>Active Games</h3>
+        <div id="matchList">
+          <div class="empty-state">
+            <p>No active games</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <h3>Conversations</h3>
+        <div id="convoList">
+          <div class="empty-state">
+            <p>No active conversations</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="match-modal" id="matchModal">
+    <div class="match-modal-card">
+      <div class="match-modal-head">
+        <span id="matchModalTitle">Match</span>
+        <button id="matchModalClose">Close</button>
+      </div>
+      <div class="match-modal-phase" id="matchModalPhase">Loading...</div>
+      <div class="match-modal-grid">
+        <div class="match-modal-panel">
+          <h3>Participants</h3>
+          <div id="matchModalPlayers"></div>
+        </div>
+        <div class="match-modal-panel">
+          <h3>Events</h3>
+          <div id="matchModalEvents"></div>
         </div>
       </div>
     </div>

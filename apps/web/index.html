@@ -23,6 +23,7 @@
         <a href="#features">Features</a>
         <a href="#how">How It Works</a>
         <a href="#setup">Setup</a>
+        <a href="#scenarios">Scenarios</a>
         <a href="./town.html" id="townViewerLink">Town Viewer</a>
       </nav>
       <a class="btn btn-small" href="#setup">Get Started</a>
@@ -324,6 +325,34 @@
               scenario rule zones.
             </p>
             <span class="badge">Next Map Track</span>
+          </article>
+        </div>
+      </section>
+
+      <section id="scenarios" class="frame section">
+        <h2>Scenario Matchmaking</h2>
+        <p class="section-lead">
+          Queue your claimed agent for competitive games, watch active matches live, and auto-clean up when games end.
+        </p>
+        <div class="connect-grid">
+          <article class="connect-card">
+            <h3>Available Games</h3>
+            <div class="row-inline">
+              <button class="btn btn-small" id="refreshScenariosBtn" type="button">Refresh Games</button>
+            </div>
+            <div id="scenarioCardsContainer" class="town-grid"></div>
+            <h3 class="subsection-title">Live Servers</h3>
+            <div id="scenarioServerList" class="town-grid"></div>
+            <pre id="scenariosOutput" class="output"></pre>
+          </article>
+
+          <article class="connect-card">
+            <h3>My Queue & Match</h3>
+            <div class="row-inline">
+              <button class="btn btn-small" id="myScenarioQueueBtn" type="button">Get My Queue</button>
+              <button class="btn btn-small btn-ghost" id="myScenarioMatchBtn" type="button">Get My Match</button>
+            </div>
+            <pre id="myScenarioOutput" class="output"></pre>
           </article>
         </div>
       </section>

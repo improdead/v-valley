@@ -20,6 +20,7 @@ from .routers.legacy import router as legacy_router
 from .routers.llm import router as llm_router
 from .routers.maps import router as maps_router
 from .routers.owners import router as owners_router
+from .routers.scenarios import router as scenarios_router
 from .routers.sim import router as sim_router
 from .routers.towns import router as towns_router
 from .services.runtime_scheduler import (
@@ -31,6 +32,7 @@ from .storage.interaction_hub import init_db as init_interaction_hub_db
 from .storage.llm_control import init_db as init_llm_db
 from .storage.map_versions import init_db as init_maps_db
 from .storage.runtime_control import init_db as init_runtime_db
+from .storage.scenarios import init_db as init_scenarios_db
 
 from packages.vvalley_core.sim.runner import SimulationBusyError
 
@@ -68,6 +70,7 @@ app.include_router(owners_router)
 app.include_router(legacy_router)
 app.include_router(sim_router)
 app.include_router(llm_router)
+app.include_router(scenarios_router)
 
 
 @app.exception_handler(SimulationBusyError)
@@ -191,6 +194,14 @@ def startup() -> None:
         logger.info("[STARTUP] Interaction hub database initialized successfully")
     except Exception as e:
         logger.error("[STARTUP] Failed to initialize interaction hub database: %s", e)
+        raise
+
+    try:
+        logger.info("[STARTUP] Initializing scenarios database...")
+        init_scenarios_db()
+        logger.info("[STARTUP] Scenarios database initialized successfully")
+    except Exception as e:
+        logger.error("[STARTUP] Failed to initialize scenarios database: %s", e)
         raise
 
     if _truthy_env("VVALLEY_AUTOSTART_TOWN_SCHEDULER", default=False):

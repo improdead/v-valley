@@ -36,6 +36,13 @@ const townCardsContainer = document.getElementById("townCardsContainer");
 const liveAgentsEl = document.getElementById("liveAgents");
 const autoJoinBtn = document.getElementById("autoJoinBtn");
 const simControlModeInput = document.getElementById("simControlMode");
+const refreshScenariosBtn = document.getElementById("refreshScenariosBtn");
+const scenarioCardsContainer = document.getElementById("scenarioCardsContainer");
+const scenarioServerList = document.getElementById("scenarioServerList");
+const scenariosOutput = document.getElementById("scenariosOutput");
+const myScenarioQueueBtn = document.getElementById("myScenarioQueueBtn");
+const myScenarioMatchBtn = document.getElementById("myScenarioMatchBtn");
+const myScenarioOutput = document.getElementById("myScenarioOutput");
 const legacyListBtn = document.getElementById("legacyListBtn");
 const legacyReplayBtn = document.getElementById("legacyReplayBtn");
 const legacyImportBtn = document.getElementById("legacyImportBtn");
@@ -246,7 +253,7 @@ async function refreshTowns() {
         card.className = "town-card town-card-live";
         card.addEventListener("click", () => {
           const base = getApiBase();
-          const viewerUrl = `./town.html?api=${encodeURIComponent(base)}`;
+          const viewerUrl = `./town.html?api=${encodeURIComponent(base)}&town=${encodeURIComponent(town.town_id)}`;
           window.location.href = viewerUrl;
         });
 
@@ -272,6 +279,204 @@ async function refreshTowns() {
   } catch (err) {
     townsOutput.textContent = `ERROR: ${err.message}\n${toPrettyJson(err.payload || {})}`;
     if (liveAgentsEl) liveAgentsEl.textContent = "n/a";
+  }
+}
+
+function getCurrentApiKey() {
+  return (meApiKeyInput?.value || "").trim();
+}
+
+async function joinScenarioQueue(scenarioKey) {
+  if (!myScenarioOutput) return;
+  const key = getCurrentApiKey();
+  if (!key) {
+    myScenarioOutput.textContent = "ERROR: missing API key in /me section";
+    return;
+  }
+  myScenarioOutput.textContent = `Joining queue: ${scenarioKey} ...`;
+  try {
+    const payload = await apiJson(`/api/v1/scenarios/${encodeURIComponent(scenarioKey)}/queue/join`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    myScenarioOutput.textContent = toPrettyJson(payload);
+    await refreshScenarios();
+  } catch (err) {
+    myScenarioOutput.textContent = `ERROR: ${err.message}\n${toPrettyJson(err.payload || {})}`;
+  }
+}
+
+async function leaveScenarioQueue(scenarioKey) {
+  if (!myScenarioOutput) return;
+  const key = getCurrentApiKey();
+  if (!key) {
+    myScenarioOutput.textContent = "ERROR: missing API key in /me section";
+    return;
+  }
+  myScenarioOutput.textContent = `Leaving queue: ${scenarioKey} ...`;
+  try {
+    const payload = await apiJson(`/api/v1/scenarios/${encodeURIComponent(scenarioKey)}/queue/leave`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    myScenarioOutput.textContent = toPrettyJson(payload);
+    await refreshScenarios();
+  } catch (err) {
+    myScenarioOutput.textContent = `ERROR: ${err.message}\n${toPrettyJson(err.payload || {})}`;
+  }
+}
+
+async function refreshScenarios() {
+  if (!scenariosOutput || !scenarioCardsContainer) return;
+  scenariosOutput.textContent = "Loading scenarios...";
+  try {
+    const payload = await apiJson("/api/v1/scenarios");
+    const scenarios = Array.isArray(payload.scenarios) ? payload.scenarios : [];
+    scenarioCardsContainer.innerHTML = "";
+
+    for (const scenario of scenarios) {
+      let queueStatus = null;
+      try {
+        queueStatus = await apiJson(`/api/v1/scenarios/${encodeURIComponent(scenario.scenario_key)}/queue/status`);
+      } catch {
+        queueStatus = null;
+      }
+
+      const card = document.createElement("article");
+      card.className = "town-card town-card-live";
+      const minPlayers = Number(scenario.min_players || 0);
+      const maxPlayers = Number(scenario.max_players || 0);
+      const queued = Number(queueStatus?.queued || 0);
+      const buyIn = Number(scenario.buy_in || 0);
+
+      card.innerHTML = `
+        <h3>${scenario.name || scenario.scenario_key}</h3>
+        <p>${minPlayers}-${maxPlayers} players · ${queued} queued</p>
+        <div class="town-card-meta">
+          <span class="badge ${queued >= minPlayers ? "badge-open" : "badge-full"}">${queued >= minPlayers ? "Ready Soon" : "Waiting"}</span>
+          <span class="badge">${buyIn > 0 ? `${buyIn} buy-in` : "No buy-in"}</span>
+        </div>
+        <div class="row-inline">
+          <button class="btn btn-small" data-join="${scenario.scenario_key}">Join Queue</button>
+          <button class="btn btn-small btn-ghost" data-leave="${scenario.scenario_key}">Leave Queue</button>
+        </div>
+      `;
+
+      card.querySelector("[data-join]")?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        joinScenarioQueue(scenario.scenario_key);
+      });
+      card.querySelector("[data-leave]")?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        leaveScenarioQueue(scenario.scenario_key);
+      });
+
+      scenarioCardsContainer.appendChild(card);
+    }
+
+    await refreshScenarioServers();
+    scenariosOutput.textContent = toPrettyJson(payload);
+  } catch (err) {
+    scenariosOutput.textContent = `ERROR: ${err.message}\n${toPrettyJson(err.payload || {})}`;
+  }
+}
+
+async function refreshScenarioServers() {
+  if (!scenarioServerList) return;
+  scenarioServerList.innerHTML = "";
+  try {
+    const payload = await apiJson("/api/v1/scenarios/servers");
+    const servers = Array.isArray(payload.servers) ? payload.servers : [];
+    if (servers.length === 0) {
+      const empty = document.createElement("article");
+      empty.className = "town-card";
+      empty.innerHTML = `
+        <h3>No live servers</h3>
+        <p>Queue for a scenario to spin up a new match server in your town.</p>
+      `;
+      scenarioServerList.appendChild(empty);
+      return;
+    }
+
+    const base = getApiBase();
+    servers.forEach((server) => {
+      const card = document.createElement("article");
+      card.className = "town-card town-card-live";
+      const scenarioLabel = String(server.scenario_key || "").includes("werewolf") ? "Werewolf" : "Anaconda";
+      const townId = String(server.town_id || "");
+      const watchUrl = `./town.html?api=${encodeURIComponent(base)}&town=${encodeURIComponent(townId)}`;
+      card.innerHTML = `
+        <h3>${scenarioLabel} · ${townId || "town"}</h3>
+        <p>${Number(server.participant_count || 0)} players · ${server.phase || "warmup"}</p>
+        <div class="town-card-meta">
+          <span class="badge">${server.match_id || ""}</span>
+          <span class="badge">${Number(server.pot || 0)} pot</span>
+        </div>
+        <div class="row-inline">
+          <button class="btn btn-small" data-watch="1">Watch</button>
+          <button class="btn btn-small btn-ghost" data-queue="1">Queue Same Game</button>
+        </div>
+      `;
+      card.querySelector("[data-watch]")?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        window.location.href = watchUrl;
+      });
+      card.querySelector("[data-queue]")?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        joinScenarioQueue(String(server.scenario_key || ""));
+      });
+      scenarioServerList.appendChild(card);
+    });
+  } catch (err) {
+    const failed = document.createElement("article");
+    failed.className = "town-card";
+    failed.innerHTML = `
+      <h3>Server list unavailable</h3>
+      <p>${String(err?.message || "Unknown error")}</p>
+    `;
+    scenarioServerList.appendChild(failed);
+  }
+}
+
+async function loadMyScenarioQueue() {
+  if (!myScenarioOutput) return;
+  const key = getCurrentApiKey();
+  if (!key) {
+    myScenarioOutput.textContent = "ERROR: missing API key in /me section";
+    return;
+  }
+  myScenarioOutput.textContent = "Loading queue...";
+  try {
+    const payload = await apiJson("/api/v1/scenarios/me/queue", {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    myScenarioOutput.textContent = toPrettyJson(payload);
+  } catch (err) {
+    myScenarioOutput.textContent = `ERROR: ${err.message}\n${toPrettyJson(err.payload || {})}`;
+  }
+}
+
+async function loadMyScenarioMatch() {
+  if (!myScenarioOutput) return;
+  const key = getCurrentApiKey();
+  if (!key) {
+    myScenarioOutput.textContent = "ERROR: missing API key in /me section";
+    return;
+  }
+  myScenarioOutput.textContent = "Loading active match...";
+  try {
+    const payload = await apiJson("/api/v1/scenarios/me/match", {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    myScenarioOutput.textContent = toPrettyJson(payload);
+    const matchId = payload?.match?.match_id;
+    if (matchId && payload?.match?.town_id) {
+      const base = getApiBase();
+      const watchUrl = `./town.html?api=${encodeURIComponent(base)}&town=${encodeURIComponent(payload.match.town_id)}`;
+      myScenarioOutput.textContent += `\n\nWatch in town viewer: ${watchUrl}`;
+    }
+  } catch (err) {
+    myScenarioOutput.textContent = `ERROR: ${err.message}\n${toPrettyJson(err.payload || {})}`;
   }
 }
 
@@ -582,6 +787,12 @@ function initOnboardingConsole() {
     persistApiBase();
     refreshTowns();
   });
+  refreshScenariosBtn?.addEventListener("click", () => {
+    persistApiBase();
+    refreshScenarios();
+  });
+  myScenarioQueueBtn?.addEventListener("click", loadMyScenarioQueue);
+  myScenarioMatchBtn?.addEventListener("click", loadMyScenarioMatch);
   legacyListBtn?.addEventListener("click", onLegacyListClick);
   legacyReplayBtn?.addEventListener("click", onLegacyReplayClick);
   legacyImportBtn?.addEventListener("click", onLegacyImportClick);
@@ -625,4 +836,5 @@ persistApiBase();
 loadApiStatus();
 refreshSetupInfo();
 refreshTowns();
+refreshScenarios();
 initHeroParallax();

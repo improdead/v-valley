@@ -27,6 +27,12 @@ from ..storage.runtime_control import (
     release_town_lease,
     reserve_tick_batch,
 )
+from .scenario_matchmaker import (
+    advance_matches,
+    form_matches,
+    get_town_agent_scenario_statuses,
+    list_active_matches_for_town,
+)
 from .interaction_sink import ingest_tick_outcomes
 
 
@@ -198,6 +204,7 @@ class TownRuntimeScheduler:
                     planner=self._planner.plan_move,
                     agent_autonomy=autonomy_map,
                     cognition_planner=self._planner,
+                    scenario_agent_statuses=get_town_agent_scenario_statuses(town_id=town_id),
                 )
                 try:
                     ingest_tick_outcomes(
@@ -210,6 +217,19 @@ class TownRuntimeScheduler:
                         payload={"batch_key": batch_key},
                         error=f"{sink_exc.__class__.__name__}: {sink_exc}",
                     )
+                formed_matches = form_matches(
+                    town_id=town_id,
+                    current_step=int(ticked.get("step") or 0),
+                )
+                advanced_matches = advance_matches(
+                    town_id=town_id,
+                    current_step=int(ticked.get("step") or 0),
+                )
+                ticked["scenario"] = {
+                    "formed_count": len(formed_matches),
+                    "advanced_count": len(advanced_matches),
+                    "active_matches": list_active_matches_for_town(town_id=town_id),
+                }
                 complete_tick_batch(
                     town_id=town_id,
                     batch_key=batch_key,

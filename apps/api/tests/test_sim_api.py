@@ -26,6 +26,7 @@ from apps.api.vvalley_api.storage.interaction_hub import reset_backend_cache_for
 from apps.api.vvalley_api.storage.llm_control import reset_backend_cache_for_tests as reset_llm_backend
 from apps.api.vvalley_api.storage.map_versions import reset_backend_cache_for_tests as reset_maps_backend
 from apps.api.vvalley_api.storage.runtime_control import reset_backend_cache_for_tests as reset_runtime_backend
+from apps.api.vvalley_api.storage.scenarios import reset_backend_cache_for_tests as reset_scenarios_backend
 from packages.vvalley_core.sim.runner import reset_simulation_states_for_tests
 
 
@@ -40,6 +41,7 @@ class SimApiTests(unittest.TestCase):
         reset_llm_backend()
         reset_runtime_backend()
         reset_interaction_backend()
+        reset_scenarios_backend()
         reset_rate_limiter()
         reset_sim_limiters()
         reset_dm_limiter()

@@ -30,6 +30,7 @@ from ..storage.agents import (
 from ..storage.llm_control import get_policy as get_llm_policy
 from ..storage.llm_control import insert_call_log
 from ..storage.map_versions import get_active_version
+from ..storage import scenarios as scenario_store
 from ..storage.runtime_control import (
     claim_town_lease,
     complete_tick_batch,
@@ -42,6 +43,12 @@ from ..storage.runtime_control import (
     release_town_lease,
     reserve_tick_batch,
     upsert_town_runtime,
+)
+from ..services.scenario_matchmaker import (
+    advance_matches,
+    form_matches,
+    get_town_agent_scenario_statuses,
+    list_active_matches_for_town,
 )
 from ..services.runtime_scheduler import (
     start_town_runtime_scheduler,
@@ -178,6 +185,40 @@ def _require_agent_membership(*, town_id: str, authorization: Optional[str]) -> 
     return agent
 
 
+def _augment_state_with_scenarios(*, town_id: str, state: dict[str, Any]) -> dict[str, Any]:
+    active_matches = list_active_matches_for_town(town_id=town_id)
+    participant_map: dict[str, dict[str, Any]] = {}
+    for match in active_matches:
+        match_id = str(match.get("match_id") or "")
+        if not match_id:
+            continue
+        participants = scenario_store.list_match_participants(match_id=match_id)
+        for participant in participants:
+            agent_id = str(participant.get("agent_id") or "")
+            if not agent_id:
+                continue
+            runtime_status = "scenario_warmup" if str(match.get("status") or "").lower() == "warmup" else "scenario_active"
+            participant_map[agent_id] = {
+                "match_id": match_id,
+                "scenario_key": str(match.get("scenario_key") or ""),
+                "phase": str(match.get("phase") or ""),
+                "status": runtime_status,
+                "participant_status": str(participant.get("status") or ""),
+                "role": participant.get("role") if str(match.get("status")) == "resolved" else None,
+            }
+
+    for npc in state.get("npcs") or []:
+        if not isinstance(npc, dict):
+            continue
+        scenario_payload = participant_map.get(str(npc.get("agent_id") or ""))
+        if scenario_payload:
+            npc["scenario"] = scenario_payload
+            npc["status"] = str(scenario_payload.get("status") or npc.get("status") or "scenario_active")
+    state["scenario_match_count"] = len(active_matches)
+    state["scenario_matches"] = active_matches
+    return state
+
+
 @router.get("/towns/{town_id}/state")
 def town_state(town_id: str) -> dict[str, Any]:
     logger.info("[SIM] State request: town_id='%s'", town_id)
@@ -188,6 +229,7 @@ def town_state(town_id: str) -> dict[str, Any]:
         map_data=map_data,
         members=members,
     )
+    state = _augment_state_with_scenarios(town_id=town_id, state=state)
     return {
         "ok": True,
         "town_id": town_id,
@@ -410,6 +452,7 @@ def town_tick(town_id: str, req: TickTownRequest) -> dict[str, Any]:
 
         autonomy_map = _autonomy_map_for_members(members)
         try:
+            scenario_agent_statuses = get_town_agent_scenario_statuses(town_id=town_id)
             ticked = tick_simulation(
                 town_id=town_id,
                 active_version=active,
@@ -421,6 +464,7 @@ def town_tick(town_id: str, req: TickTownRequest) -> dict[str, Any]:
                 planner=_COGNITION_PLANNER.plan_move,
                 agent_autonomy=autonomy_map,
                 cognition_planner=_COGNITION_PLANNER,
+                scenario_agent_statuses=scenario_agent_statuses,
             )
             try:
                 interaction_ingest = ingest_tick_outcomes(
@@ -436,6 +480,19 @@ def town_tick(town_id: str, req: TickTownRequest) -> dict[str, Any]:
                     error=f"{sink_exc.__class__.__name__}: {sink_exc}",
                 )
                 interaction_ingest = {"inbox_created": 0, "escalations_created": 0}
+            formed_matches = form_matches(
+                town_id=town_id,
+                current_step=int(ticked.get("step") or 0),
+            )
+            advanced_matches = advance_matches(
+                town_id=town_id,
+                current_step=int(ticked.get("step") or 0),
+            )
+            ticked["scenario"] = {
+                "formed_count": len(formed_matches),
+                "advanced_count": len(advanced_matches),
+                "active_matches": list_active_matches_for_town(town_id=town_id),
+            }
             complete_tick_batch(
                 town_id=town_id,
                 batch_key=batch_row_key,
