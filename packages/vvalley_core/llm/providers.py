@@ -284,6 +284,39 @@ _JSON_SCHEMA_TASKS: dict[str, dict[str, Any]] = {
         "required": ["schedule"],
         "additionalProperties": False,
     },
+    "contextual_prioritize": {
+        "type": "object",
+        "properties": {
+            "branch": {"type": "string", "enum": ["personal", "social", "routine", "exploration"]},
+            "reason": {"type": "string", "maxLength": 240},
+        },
+        "required": ["branch", "reason"],
+        "additionalProperties": False,
+    },
+    "identity_evolution": {
+        "type": "object",
+        "properties": {
+            "updated_traits": {"type": "array", "items": {"type": "string", "maxLength": 80}},
+            "updated_habits": {"type": "array", "items": {"type": "string", "maxLength": 120}},
+            "updated_values": {"type": "array", "items": {"type": "string", "maxLength": 120}},
+            "updated_attitudes": {
+                "type": "object",
+                "additionalProperties": {"type": "string", "maxLength": 160},
+            },
+            "evolution_narrative": {"type": "string", "maxLength": 400},
+        },
+        "required": ["updated_traits", "updated_habits", "updated_values", "updated_attitudes", "evolution_narrative"],
+        "additionalProperties": False,
+    },
+    "social_attitude": {
+        "type": "object",
+        "properties": {
+            "attitude": {"type": "string", "maxLength": 160},
+            "relationship_delta": {"type": "number", "minimum": -3.0, "maximum": 3.0},
+        },
+        "required": ["attitude", "relationship_delta"],
+        "additionalProperties": False,
+    },
 }
 
 
@@ -722,6 +755,24 @@ _TASK_PROMPTS: dict[str, tuple[str, str]] = {
         "Recompose this agent's daily schedule after an interruption.\n"
         "Insert the new activity at the current time, then adjust remaining blocks.\n"
         "Output: JSON with schedule (array of {description, duration_mins}).\n\n"
+    ),
+    "contextual_prioritize": (
+        "You are a V-Valley branch prioritizer. Pick exactly one planning branch for this tick "
+        "based on state, nearby context, schedule pressure, and recent memories. Return JSON.",
+        "Choose one branch from: personal, social, routine, exploration.\n"
+        "Output: JSON with branch and reason.\n\n",
+    ),
+    "identity_evolution": (
+        "You are a V-Valley identity consolidation engine. Convert repeated social and reflective "
+        "patterns into updated stable traits, habits, values, and social attitudes. Return JSON.",
+        "Update identity fields conservatively using recent conversations/reflections.\n"
+        "Output: JSON with updated_traits, updated_habits, updated_values, updated_attitudes, evolution_narrative.\n\n",
+    ),
+    "social_attitude": (
+        "You are a V-Valley post-conversation social assessor. Determine the agent's updated attitude "
+        "toward the partner and a relationship score delta from this interaction. Return JSON.",
+        "Assess this conversation outcome.\n"
+        "Output: JSON with attitude and relationship_delta (float between -3 and 3).\n\n",
     ),
 }
 

@@ -264,17 +264,48 @@ def _heuristic_action_address(context: dict[str, Any]) -> dict[str, Any]:
         idx = _hash_int(f"addr:{context.get('agent_id')}:{action_desc}") % len(available_sectors)
         sector = available_sectors[idx]
 
-    # Pick arena/object from available lists
+    # Pick arena/object from available lists with spatial awareness
     available_arenas = context.get("available_arenas") or []
-    arena = available_arenas[0] if available_arenas else None
     available_objects = context.get("available_objects") or []
-    game_object = available_objects[0] if available_objects else None
+    agent_x = int(context.get("agent_x") or 0)
+    agent_y = int(context.get("agent_y") or 0)
+    arena_positions = context.get("arena_positions") or {}
+    object_positions = context.get("object_positions") or {}
+    arena = _pick_nearest(available_arenas, arena_positions, agent_x, agent_y, action_desc)
+    game_object = _pick_nearest(available_objects, object_positions, agent_x, agent_y, action_desc)
 
     return {
         "action_sector": sector,
         "action_arena": arena,
         "action_game_object": game_object,
     }
+
+
+def _pick_nearest(
+    names: list[str],
+    positions: dict[str, tuple[int, int]],
+    ax: int,
+    ay: int,
+    action_desc: str,
+) -> str | None:
+    """Pick nearest name by keyword match first, then manhattan distance."""
+    if not names:
+        return None
+    # Keyword match first
+    words = [w for w in action_desc.split() if len(w) > 3]
+    for n in names:
+        nl = n.lower()
+        if any(w in nl for w in words):
+            return n
+    # Then closest by manhattan distance
+    if positions:
+        def dist(n: str) -> int:
+            pos = positions.get(n)
+            if pos is None:
+                return 9999
+            return abs(ax - pos[0]) + abs(ay - pos[1])
+        return min(names, key=dist)
+    return names[0]
 
 
 def _heuristic_object_state(context: dict[str, Any]) -> dict[str, Any]:
@@ -399,6 +430,63 @@ def _heuristic_schedule_recomposition(context: dict[str, Any]) -> dict[str, Any]
             new_schedule.pop()
 
     return {"schedule": new_schedule, "inserted_activity": inserted_act, "inserted_duration_mins": inserted_dur}
+
+
+def _heuristic_contextual_prioritize(context: dict[str, Any]) -> dict[str, Any]:
+    scores = context.get("branch_scores") or {}
+    if not isinstance(scores, dict) or not scores:
+        return {"branch": "routine", "reason": "default routine priority"}
+    best_branch = "routine"
+    best_score = -99999.0
+    for name, score in scores.items():
+        try:
+            val = float(score)
+        except Exception:
+            continue
+        if val > best_score:
+            best_score = val
+            best_branch = str(name)
+    return {
+        "branch": best_branch,
+        "reason": f"{best_branch} scored highest in current context",
+    }
+
+
+def _heuristic_identity_evolution(context: dict[str, Any]) -> dict[str, Any]:
+    traits = [str(item) for item in (context.get("current_traits") or []) if str(item).strip()]
+    habits = [str(item) for item in (context.get("current_habits") or []) if str(item).strip()]
+    values = [str(item) for item in (context.get("current_values") or []) if str(item).strip()]
+    attitudes = context.get("social_attitudes") or {}
+    if not isinstance(attitudes, dict):
+        attitudes = {}
+
+    conversation_count = len(context.get("recent_conversations") or [])
+    if conversation_count >= 5 and "socially engaged" not in traits:
+        traits.append("socially engaged")
+    if conversation_count >= 8 and "checks in with neighbors" not in habits:
+        habits.append("checks in with neighbors")
+    positive = sum(1 for value in attitudes.values() if "trust" in str(value).lower() or "friendly" in str(value).lower())
+    if positive >= 2 and "values community" not in values:
+        values.append("values community")
+    if not traits:
+        traits = ["steady"]
+
+    return {
+        "updated_traits": traits[:8],
+        "updated_habits": habits[:8],
+        "updated_values": values[:8],
+        "updated_attitudes": attitudes,
+        "evolution_narrative": "Recent social experiences have slightly reshaped this agent's identity.",
+    }
+
+
+def _heuristic_social_attitude(context: dict[str, Any]) -> dict[str, Any]:
+    summary = str(context.get("conversation_summary") or "").lower()
+    if any(token in summary for token in ("argue", "conflict", "lie", "deceive", "distrust")):
+        return {"attitude": "wary", "relationship_delta": -1.2}
+    if any(token in summary for token in ("warm", "friendly", "helpful", "supportive", "laugh")):
+        return {"attitude": "trusting", "relationship_delta": 1.8}
+    return {"attitude": "neutral", "relationship_delta": 0.6}
 
 
 class CognitionPlanner:
@@ -535,4 +623,28 @@ class CognitionPlanner:
         """Recompose the daily schedule after a reaction/chat interruption."""
         return self._run_task(
             task_name="schedule_recomposition", context=context, heuristic_fn=_heuristic_schedule_recomposition
+        )
+
+    def contextual_prioritize(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Select which planning branch should dominate this tick."""
+        return self._run_task(
+            task_name="contextual_prioritize",
+            context=context,
+            heuristic_fn=_heuristic_contextual_prioritize,
+        )
+
+    def evolve_identity(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Consolidate repeated social/reflective patterns into evolving identity."""
+        return self._run_task(
+            task_name="identity_evolution",
+            context=context,
+            heuristic_fn=_heuristic_identity_evolution,
+        )
+
+    def assess_social_attitude(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Assess post-conversation attitude and relationship delta."""
+        return self._run_task(
+            task_name="social_attitude",
+            context=context,
+            heuristic_fn=_heuristic_social_attitude,
         )

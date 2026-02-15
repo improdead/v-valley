@@ -38,6 +38,8 @@ _STOPWORDS = {
     "with",
 }
 
+_EVENT_STREAM_KINDS: frozenset[str] = frozenset({"event", "chat"})
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -120,6 +122,8 @@ class MemoryNode:
     embedding: tuple[float, ...] = ()
     address: str | None = None
     expiration_step: int | None = None
+    memory_tier: str = "stm"
+    retrieval_count: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -139,6 +143,8 @@ class MemoryNode:
             "embedding_key": self.embedding_key,
             "address": self.address,
             "expiration_step": self.expiration_step,
+            "memory_tier": self.memory_tier,
+            "retrieval_count": int(self.retrieval_count),
         }
 
     @classmethod
@@ -160,6 +166,13 @@ class MemoryNode:
                 expiration_step = int(expiration_value)
             except Exception:
                 expiration_step = None
+        memory_tier = str(raw.get("memory_tier") or "stm").strip().lower()
+        if memory_tier not in {"stm", "ltm"}:
+            memory_tier = "stm"
+        try:
+            retrieval_count = max(0, int(raw.get("retrieval_count") or 0))
+        except Exception:
+            retrieval_count = 0
         return cls(
             node_id=node_id,
             kind=str(raw.get("kind") or "event"),
@@ -178,6 +191,46 @@ class MemoryNode:
             embedding=_embedding_for_text(embedding_key),
             address=(str(raw.get("address")) if raw.get("address") is not None else None),
             expiration_step=expiration_step,
+            memory_tier=memory_tier,
+            retrieval_count=retrieval_count,
+        )
+
+
+@dataclass
+class PlanningBranch:
+    name: str
+    objective: str
+    subtasks: list[str] = field(default_factory=list)
+    priority_weight: float = 1.0
+    last_active_step: int = 0
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "name": str(self.name),
+            "objective": str(self.objective),
+            "subtasks": [str(value) for value in self.subtasks if str(value).strip()],
+            "priority_weight": float(self.priority_weight),
+            "last_active_step": int(self.last_active_step),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "PlanningBranch":
+        if not isinstance(raw, dict):
+            return cls(name="routine", objective="follow daily responsibilities")
+        try:
+            priority_weight = float(raw.get("priority_weight") or 1.0)
+        except Exception:
+            priority_weight = 1.0
+        try:
+            last_active_step = max(0, int(raw.get("last_active_step") or 0))
+        except Exception:
+            last_active_step = 0
+        return cls(
+            name=str(raw.get("name") or "routine"),
+            objective=str(raw.get("objective") or "follow daily responsibilities"),
+            subtasks=[str(value) for value in (raw.get("subtasks") or []) if str(value).strip()],
+            priority_weight=priority_weight,
+            last_active_step=last_active_step,
         )
 
 
@@ -236,6 +289,10 @@ class AgentScratch:
     long_term_goals: list[str] = field(default_factory=list)
     daily_schedule: list[ScheduleItem] = field(default_factory=list)
     daily_schedule_hourly_original: list[ScheduleItem] = field(default_factory=list)
+    planning_branches: list[PlanningBranch] = field(default_factory=list)
+    active_branch: str = "routine"
+    schedule_override_reason: str | None = None
+    long_term_objective: str | None = None
 
     curr_step: int = 0
     curr_tile: tuple[int, int] | None = None
@@ -255,6 +312,10 @@ class AgentScratch:
 
     currently: str | None = None
     last_day_index: int = -1
+    last_social_step: int = 0
+    steps_at_current_location: int = 0
+    recent_goal_locations: list[tuple[int, int]] = field(default_factory=list)
+    social_interactions_count: int = 0
 
     # --- ISS (Identity Stable Set) fields ---
     iss_name: str | None = None
@@ -269,7 +330,26 @@ class AgentScratch:
     next_daily_plan_step: int = 0
     next_long_term_plan_step: int = 0
 
+    # --- Evolving identity fields ---
+    evolving_traits: list[str] = field(default_factory=list)
+    evolving_habits: list[str] = field(default_factory=list)
+    evolving_values: list[str] = field(default_factory=list)
+    social_attitudes: dict[str, str] = field(default_factory=dict)
+    identity_version: int = 0
+    last_identity_update_step: int = 0
+
+    def ensure_default_branches(self) -> None:
+        if self.planning_branches:
+            return
+        self.planning_branches = [
+            PlanningBranch(name="personal", objective="maintain health and rest"),
+            PlanningBranch(name="social", objective="build relationships and socialize"),
+            PlanningBranch(name="routine", objective="follow daily schedule and responsibilities"),
+            PlanningBranch(name="exploration", objective="discover new places and experiences"),
+        ]
+
     def ensure_default_schedule(self, *, agent_name: str) -> None:
+        self.ensure_default_branches()
         if self.daily_schedule:
             return
         self.daily_req = [
@@ -299,6 +379,13 @@ class AgentScratch:
                 f"{agent_name} adapts plans based on recent events",
             ]
 
+    def push_recent_goal(self, *, x: int, y: int, limit: int = 5) -> None:
+        point = (int(x), int(y))
+        self.recent_goal_locations = [item for item in self.recent_goal_locations if item != point]
+        self.recent_goal_locations.append(point)
+        if len(self.recent_goal_locations) > max(1, int(limit)):
+            self.recent_goal_locations = self.recent_goal_locations[-max(1, int(limit)) :]
+
     def current_schedule_state(self, *, step: int, step_minutes: int = 10) -> tuple[ScheduleItem | None, int, int]:
         self.curr_step = int(step)
         if not self.daily_schedule:
@@ -324,16 +411,27 @@ class AgentScratch:
         parts.append(f"Name: {display_name}")
         if self.age is not None:
             parts.append(f"Age: {self.age}")
-        if self.innate:
+        traits = ", ".join(i for i in self.evolving_traits if str(i).strip())
+        if traits:
+            parts.append(f"Traits: {traits}")
+        elif self.innate:
             parts.append(f"Innate traits: {self.innate}")
         if self.learned:
             parts.append(f"Background: {self.learned}")
-        if self.lifestyle:
+        habits = ", ".join(i for i in self.evolving_habits if str(i).strip())
+        if habits:
+            parts.append(f"Habits: {habits}")
+        elif self.lifestyle:
             parts.append(f"Lifestyle: {self.lifestyle}")
+        values = ", ".join(i for i in self.evolving_values if str(i).strip())
+        if values:
+            parts.append(f"Values: {values}")
         if self.living_area:
             parts.append(f"Living area: {self.living_area}")
         if self.currently:
             parts.append(f"Currently: {self.currently}")
+        if self.long_term_objective:
+            parts.append(f"Objective: {self.long_term_objective}")
         return "\n".join(parts)
 
     def as_dict(self) -> dict[str, object]:
@@ -353,6 +451,10 @@ class AgentScratch:
             "long_term_goals": list(self.long_term_goals),
             "daily_schedule": [item.as_dict() for item in self.daily_schedule],
             "daily_schedule_hourly_original": [item.as_dict() for item in self.daily_schedule_hourly_original],
+            "planning_branches": [branch.as_dict() for branch in self.planning_branches],
+            "active_branch": self.active_branch,
+            "schedule_override_reason": self.schedule_override_reason,
+            "long_term_objective": self.long_term_objective,
             "curr_step": int(self.curr_step),
             "curr_tile": list(self.curr_tile) if self.curr_tile is not None else None,
             "act_address": self.act_address,
@@ -369,6 +471,10 @@ class AgentScratch:
             "chatting_end_step": self.chatting_end_step,
             "currently": self.currently,
             "last_day_index": int(self.last_day_index),
+            "last_social_step": int(self.last_social_step),
+            "steps_at_current_location": int(self.steps_at_current_location),
+            "recent_goal_locations": [list(i) for i in self.recent_goal_locations],
+            "social_interactions_count": int(self.social_interactions_count),
             "iss_name": self.iss_name,
             "first_name": self.first_name,
             "last_name": self.last_name,
@@ -379,6 +485,12 @@ class AgentScratch:
             "living_area": self.living_area,
             "next_daily_plan_step": int(self.next_daily_plan_step),
             "next_long_term_plan_step": int(self.next_long_term_plan_step),
+            "evolving_traits": list(self.evolving_traits),
+            "evolving_habits": list(self.evolving_habits),
+            "evolving_values": list(self.evolving_values),
+            "social_attitudes": dict(self.social_attitudes),
+            "identity_version": int(self.identity_version),
+            "last_identity_update_step": int(self.last_identity_update_step),
         }
 
     @classmethod
@@ -400,6 +512,17 @@ class AgentScratch:
             day_minutes=max(60, int(raw.get("day_minutes") or (24 * 60))),
             daily_req=[str(value) for value in (raw.get("daily_req") or []) if str(value).strip()],
             long_term_goals=[str(value) for value in (raw.get("long_term_goals") or []) if str(value).strip()],
+            active_branch=str(raw.get("active_branch") or "routine"),
+            schedule_override_reason=(
+                str(raw.get("schedule_override_reason"))
+                if raw.get("schedule_override_reason") is not None
+                else None
+            ),
+            long_term_objective=(
+                str(raw.get("long_term_objective"))
+                if raw.get("long_term_objective") is not None
+                else None
+            ),
             curr_step=int(raw.get("curr_step") or 0),
             act_address=(str(raw.get("act_address")) if raw.get("act_address") is not None else None),
             act_start_step=(int(raw["act_start_step"]) if raw.get("act_start_step") is not None else None),
@@ -411,6 +534,9 @@ class AgentScratch:
             chatting_end_step=(int(raw["chatting_end_step"]) if raw.get("chatting_end_step") is not None else None),
             currently=(str(raw.get("currently")) if raw.get("currently") is not None else None),
             last_day_index=int(raw.get("last_day_index") or -1),
+            last_social_step=max(0, int(raw.get("last_social_step") or 0)),
+            steps_at_current_location=max(0, int(raw.get("steps_at_current_location") or 0)),
+            social_interactions_count=max(0, int(raw.get("social_interactions_count") or 0)),
             iss_name=(str(raw.get("iss_name")) if raw.get("iss_name") is not None else None),
             first_name=(str(raw.get("first_name")) if raw.get("first_name") is not None else None),
             last_name=(str(raw.get("last_name")) if raw.get("last_name") is not None else None),
@@ -421,6 +547,11 @@ class AgentScratch:
             living_area=(str(raw.get("living_area")) if raw.get("living_area") is not None else None),
             next_daily_plan_step=max(0, int(raw.get("next_daily_plan_step") or 0)),
             next_long_term_plan_step=max(0, int(raw.get("next_long_term_plan_step") or 0)),
+            evolving_traits=[str(value) for value in (raw.get("evolving_traits") or []) if str(value).strip()],
+            evolving_habits=[str(value) for value in (raw.get("evolving_habits") or []) if str(value).strip()],
+            evolving_values=[str(value) for value in (raw.get("evolving_values") or []) if str(value).strip()],
+            identity_version=max(0, int(raw.get("identity_version") or 0)),
+            last_identity_update_step=max(0, int(raw.get("last_identity_update_step") or 0)),
         )
         curr_tile = raw.get("curr_tile")
         if isinstance(curr_tile, (list, tuple)) and len(curr_tile) == 2:
@@ -439,6 +570,16 @@ class AgentScratch:
         ]
         if not scratch.daily_schedule_hourly_original and scratch.daily_schedule:
             scratch.daily_schedule_hourly_original = list(scratch.daily_schedule)
+        branches_raw = raw.get("planning_branches") or []
+        branches: list[PlanningBranch] = []
+        for branch in branches_raw:
+            if not isinstance(branch, dict):
+                continue
+            try:
+                branches.append(PlanningBranch.from_dict(branch))
+            except Exception:
+                continue
+        scratch.planning_branches = branches
         planned_path_raw = raw.get("planned_path") or []
         planned_path: list[tuple[int, int]] = []
         for point in planned_path_raw:
@@ -456,6 +597,16 @@ class AgentScratch:
                 continue
             chat_lines.append((str(row[0]), str(row[1])))
         scratch.chat = chat_lines
+        recent_goals_raw = raw.get("recent_goal_locations") or []
+        recent_goals: list[tuple[int, int]] = []
+        for point in recent_goals_raw:
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                continue
+            try:
+                recent_goals.append((int(point[0]), int(point[1])))
+            except Exception:
+                continue
+        scratch.recent_goal_locations = recent_goals[-5:]
         buffer_raw = raw.get("chatting_with_buffer") or {}
         buffer_out: dict[str, int] = {}
         if isinstance(buffer_raw, dict):
@@ -465,6 +616,18 @@ class AgentScratch:
                 except Exception:
                     continue
         scratch.chatting_with_buffer = buffer_out
+        attitudes_raw = raw.get("social_attitudes") or {}
+        if isinstance(attitudes_raw, dict):
+            scratch.social_attitudes = {
+                str(key): str(value)
+                for key, value in attitudes_raw.items()
+                if str(key).strip() and str(value).strip()
+            }
+        scratch.ensure_default_branches()
+        if not scratch.evolving_traits and scratch.innate:
+            scratch.evolving_traits = [i.strip() for i in str(scratch.innate).split(",") if i.strip()]
+        if not scratch.evolving_habits and scratch.lifestyle:
+            scratch.evolving_habits = [str(scratch.lifestyle)]
         return scratch
 
 
@@ -640,6 +803,10 @@ class AgentMemory:
             memory.scratch.learned = str(learned).strip() or None
             memory.scratch.lifestyle = str(lifestyle).strip() or None
             memory.scratch.living_area = str(persona.get("living_area", "")).strip() or None
+            memory.scratch.evolving_traits = [item.strip() for item in str(innate).split(",") if item.strip()]
+            if lifestyle and str(lifestyle).strip():
+                memory.scratch.evolving_habits = [str(lifestyle).strip()]
+            memory.scratch.evolving_values = []
 
             if isinstance(daily_req, list) and daily_req:
                 memory.scratch.daily_req = [str(r) for r in daily_req if str(r).strip()]
@@ -695,6 +862,7 @@ class AgentMemory:
                 evidence_ids=(),
                 decrement_trigger=False,
             )
+        memory.scratch.ensure_default_branches()
         return memory
 
     def _node_keywords(self, *, subject: str, predicate: str, object_value: str, description: str) -> tuple[str, ...]:
@@ -742,8 +910,14 @@ class AgentMemory:
         decrement_trigger: bool = True,
         address: str | None = None,
         expiration_step: int | None = None,
+        memory_tier: str = "stm",
     ) -> MemoryNode:
         kind_normalized = str(kind or "event").strip().lower() or "event"
+        tier = str(memory_tier or "stm").strip().lower()
+        if tier not in {"stm", "ltm"}:
+            tier = "stm"
+        if kind_normalized == "reflection" and memory_tier == "stm":
+            tier = "ltm"
         evidence = tuple(str(i) for i in evidence_ids if str(i))
         depth = 0
         if kind_normalized in {"thought", "reflection"}:
@@ -777,6 +951,8 @@ class AgentMemory:
             embedding=_embedding_for_text(str(description)),
             address=address,
             expiration_step=expiration_step,
+            memory_tier=tier,
+            retrieval_count=0,
         )
         self.nodes.append(node)
         self.id_to_node[node.node_id] = node
@@ -1133,13 +1309,19 @@ class AgentMemory:
         target_name: str,
         message: str,
         transcript: Iterable[tuple[str, str]] | None = None,
+        relationship_delta: float = 2.0,
+        attitude: str | None = None,
     ) -> MemoryNode:
         target_id = str(target_agent_id)
         target = str(target_name)
-        self.relationship_scores[target_id] = float(self.relationship_scores.get(target_id, 0.0)) + 2.0
+        self.relationship_scores[target_id] = float(self.relationship_scores.get(target_id, 0.0)) + float(relationship_delta)
+        if attitude and str(attitude).strip():
+            self.scratch.social_attitudes[target] = str(attitude).strip()
         self.scratch.chatting_with = target
         self.scratch.chatting_end_step = int(step) + 2
         self.scratch.chatting_with_buffer[target] = int(step) + 20
+        self.scratch.last_social_step = int(step)
+        self.scratch.social_interactions_count = int(self.scratch.social_interactions_count) + 1
         if transcript:
             for speaker, utterance in transcript:
                 self.scratch.chat.append((str(speaker), str(utterance)))
@@ -1274,6 +1456,26 @@ class AgentMemory:
             out.append({"agent_id": agent_id, "score": round(float(score), 3)})
         return out
 
+    def retrieve_by_kind(
+        self,
+        *,
+        kind: str,
+        limit: int = 10,
+        memory_tier: str | None = None,
+    ) -> list[MemoryNode]:
+        normalized_kind = str(kind or "").strip().lower()
+        normalized_tier = str(memory_tier or "").strip().lower()
+        out: list[MemoryNode] = []
+        for node in reversed(self.nodes):
+            if normalized_kind and node.kind != normalized_kind:
+                continue
+            if normalized_tier in {"stm", "ltm"} and node.memory_tier != normalized_tier:
+                continue
+            out.append(node)
+            if len(out) >= max(1, int(limit)):
+                break
+        return out
+
     def _combined_nodes_for_retrieval(self) -> list[MemoryNode]:
         ordered_ids: list[str] = []
         seen: set[str] = set()
@@ -1292,8 +1494,25 @@ class AgentMemory:
             out.append(node)
         return out
 
-    def retrieve_ranked(self, *, focal_text: str, step: int, limit: int = 8) -> list[dict[str, object]]:
-        nodes = self._combined_nodes_for_retrieval()
+    @staticmethod
+    def _tier_weight_for_retrieval(*, node: MemoryNode, retrieval_mode: str) -> float:
+        mode = str(retrieval_mode or "balanced").strip().lower()
+        if mode in {"short_term", "reactive", "short_action"}:
+            return 2.0 if node.memory_tier == "stm" else 1.0
+        if mode in {"long_term", "strategic", "long_term_plan", "daily_plan"}:
+            return 2.0 if node.memory_tier == "ltm" else 1.0
+        return 1.0
+
+    def _rank_nodes(
+        self,
+        nodes: list[MemoryNode],
+        *,
+        focal_text: str,
+        step: int,
+        limit: int,
+        retrieval_mode: str = "balanced",
+    ) -> list[dict[str, object]]:
+        """Score and rank a list of memory nodes. Shared core for retrieval methods."""
         if not nodes:
             return []
 
@@ -1320,12 +1539,16 @@ class AgentMemory:
                 + self.scratch.relevance_w * relevance_out.get(nid, 0.0) * gw_relevance
                 + self.scratch.importance_w * importance_out.get(nid, 0.0) * gw_importance
             )
+            score *= self._tier_weight_for_retrieval(node=node, retrieval_mode=retrieval_mode)
             scored.append((float(score), node))
 
         scored.sort(key=lambda pair: (-pair[0], -int(pair[1].step)))
         out: list[dict[str, object]] = []
         for score, node in scored[: max(1, int(limit))]:
             node.last_accessed_step = int(step)
+            node.retrieval_count = int(node.retrieval_count) + 1
+            if node.memory_tier == "stm" and node.retrieval_count >= 3:
+                node.memory_tier = "ltm"
             out.append(
                 {
                     "node_id": node.node_id,
@@ -1336,9 +1559,86 @@ class AgentMemory:
                     "step": int(node.step),
                     "keywords": list(node.keywords),
                     "evidence_ids": list(node.evidence_ids),
+                    "memory_tier": node.memory_tier,
                 }
             )
         return out
+
+    def retrieve_ranked(
+        self,
+        *,
+        focal_text: str,
+        step: int,
+        limit: int = 8,
+        retrieval_mode: str = "balanced",
+    ) -> list[dict[str, object]]:
+        nodes = self._combined_nodes_for_retrieval()
+        return self._rank_nodes(
+            nodes,
+            focal_text=focal_text,
+            step=step,
+            limit=limit,
+            retrieval_mode=retrieval_mode,
+        )
+
+    def retrieve_ranked_by_stream(
+        self,
+        *,
+        focal_text: str,
+        step: int,
+        limit: int = 6,
+        retrieval_mode: str = "balanced",
+    ) -> dict[str, list[dict[str, object]]]:
+        """Retrieve memories balanced across event (factual) and perception (subjective) streams."""
+        nodes = self._combined_nodes_for_retrieval()
+        if not nodes:
+            return {"event_stream": [], "perception_stream": []}
+
+        event_nodes = [n for n in nodes if n.kind in _EVENT_STREAM_KINDS]
+        perception_nodes = [n for n in nodes if n.kind not in _EVENT_STREAM_KINDS]
+
+        half = max(1, limit // 2)
+        other_half = limit - half
+
+        event_results = self._rank_nodes(
+            event_nodes,
+            focal_text=focal_text,
+            step=step,
+            limit=half,
+            retrieval_mode=retrieval_mode,
+        )
+        perception_results = self._rank_nodes(
+            perception_nodes,
+            focal_text=focal_text,
+            step=step,
+            limit=other_half,
+            retrieval_mode=retrieval_mode,
+        )
+
+        # Backfill: if one stream is short, give extra slots to the other
+        if len(event_results) < half and perception_nodes:
+            extra = half - len(event_results)
+            perception_results = self._rank_nodes(
+                perception_nodes,
+                focal_text=focal_text,
+                step=step,
+                limit=other_half + extra,
+                retrieval_mode=retrieval_mode,
+            )
+        elif len(perception_results) < other_half and event_nodes:
+            extra = other_half - len(perception_results)
+            event_results = self._rank_nodes(
+                event_nodes,
+                focal_text=focal_text,
+                step=step,
+                limit=half + extra,
+                retrieval_mode=retrieval_mode,
+            )
+
+        return {
+            "event_stream": event_results,
+            "perception_stream": perception_results,
+        }
 
     def _reflection_focal_points(self, *, step: int = 0) -> list[str]:
         candidates = self.nodes[-max(8, min(32, len(self.nodes))):]
@@ -1457,7 +1757,7 @@ class AgentMemory:
         self.scratch.chatting_end_step = None
         return created
 
-    def maybe_reflect(self, *, step: int) -> list[MemoryNode]:
+    def maybe_reflect(self, *, step: int, step_minutes: int = 10) -> list[MemoryNode]:
         out: list[MemoryNode] = []
         if self.scratch.importance_trigger_curr <= 0 and self.nodes:
             focal_points = self._reflection_focal_points(step=step)
@@ -1505,6 +1805,7 @@ class AgentMemory:
                                         evidence_ids=evidence_ids,
                                         decrement_trigger=False,
                                         expiration_step=int(step) + (24 * 7),
+                                        memory_tier="ltm",
                                     )
                                 )
                             continue  # Skip deterministic fallback for this focal point
@@ -1525,6 +1826,7 @@ class AgentMemory:
                         evidence_ids=evidence_ids,
                         decrement_trigger=False,
                         expiration_step=int(step) + (24 * 7),
+                        memory_tier="ltm",
                     )
                 )
             top_rel = self.top_relationships(limit=1)
@@ -1552,6 +1854,7 @@ class AgentMemory:
 
         # Prune expired and over-cap nodes
         self.prune_expired(step=step)
+        self._gc_stm(step=step, step_minutes=step_minutes)
         self._evict_to_cap(step=step)
 
         return out
@@ -1561,6 +1864,8 @@ class AgentMemory:
     # ------------------------------------------------------------------
 
     MAX_MEMORY_NODES = 2000
+    STM_GC_MAX_AGE_STEPS = 50
+    STM_GC_MAX_AGE_MINUTES = STM_GC_MAX_AGE_STEPS * 10
 
     def prune_expired(self, *, step: int) -> int:
         """Remove nodes past their expiration_step. Returns count removed."""
@@ -1568,6 +1873,22 @@ class AgentMemory:
         for node in self.nodes:
             if node.expiration_step is not None and node.expiration_step <= step:
                 to_remove.add(node.node_id)
+        if not to_remove:
+            return 0
+        return self._remove_nodes(to_remove)
+
+    def _gc_stm(self, *, step: int, step_minutes: int = 10) -> int:
+        """Garbage-collect stale STM nodes not promoted to LTM."""
+        to_remove: set[str] = set()
+        normalized_step_minutes = max(1, int(step_minutes))
+        max_age_steps = max(1, int(self.STM_GC_MAX_AGE_MINUTES / normalized_step_minutes))
+        cutoff = int(step) - max_age_steps
+        for node in self.nodes:
+            if node.memory_tier != "stm":
+                continue
+            if int(node.step) > cutoff:
+                continue
+            to_remove.add(node.node_id)
         if not to_remove:
             return 0
         return self._remove_nodes(to_remove)
@@ -1619,18 +1940,23 @@ class AgentMemory:
         thought_count = len(self.seq_thought)
         chat_count = len(self.seq_chat)
         reflection_count = len(self.seq_reflection)
+        stm_count = sum(1 for node in self.nodes if node.memory_tier == "stm")
+        ltm_count = sum(1 for node in self.nodes if node.memory_tier == "ltm")
         return {
             "total_nodes": len(self.nodes),
             "event_count": int(event_count),
             "thought_count": int(thought_count),
             "chat_count": int(chat_count),
             "reflection_count": int(reflection_count),
+            "stm_count": int(stm_count),
+            "ltm_count": int(ltm_count),
             "known_places": len(self.known_places),
             "top_relationships": self.top_relationships(limit=3),
             "reflection_trigger_curr": int(self.scratch.importance_trigger_curr),
             "reflection_trigger_max": int(self.scratch.importance_trigger_max),
             "daily_schedule_items": len(self.scratch.daily_schedule),
             "active_action": self.scratch.act_description,
+            "active_branch": self.scratch.active_branch,
         }
 
     def snapshot(self, *, limit: int = 40) -> dict[str, object]:

@@ -249,6 +249,33 @@ DEFAULT_TASK_POLICIES: dict[str, TaskPolicy] = {
         timeout_ms=4500,
         retry_limit=1,
     ),
+    "contextual_prioritize": TaskPolicy(
+        task_name="contextual_prioritize",
+        model_tier="cheap",
+        max_input_tokens=280,
+        max_output_tokens=48,
+        temperature=0.1,
+        timeout_ms=1400,
+        retry_limit=1,
+    ),
+    "identity_evolution": TaskPolicy(
+        task_name="identity_evolution",
+        model_tier="strong",
+        max_input_tokens=2400,
+        max_output_tokens=400,
+        temperature=0.5,
+        timeout_ms=6500,
+        retry_limit=2,
+    ),
+    "social_attitude": TaskPolicy(
+        task_name="social_attitude",
+        model_tier="fast",
+        max_input_tokens=1000,
+        max_output_tokens=120,
+        temperature=0.3,
+        timeout_ms=2600,
+        retry_limit=1,
+    ),
 }
 
 

@@ -110,7 +110,7 @@ def _decision_metrics_from_batches(
             used_tier = str(decision.get("used_tier") or "").strip().lower()
             if route.startswith("external_action"):
                 external_action_events += 1
-            if used_tier == "heuristic" or route in {"heuristic", "planner_error"}:
+            if used_tier == "heuristic" or route in {"heuristic", "planner_error", "needs_prefilter"}:
                 heuristic_fallback_events += 1
             if route == "awaiting_user_agent_autonomy_limit":
                 autonomy_limit_events += 1

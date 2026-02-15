@@ -10,6 +10,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import random as _random_mod
 import re
 import threading
 from typing import Any, Callable, Optional
@@ -131,6 +132,9 @@ class NpcState:
     goal_reason: str | None = None
     sprite_name: str | None = None
     persona: dict[str, Any] | None = None
+    energy: float = 80.0
+    satiety: float = 70.0
+    mood: float = 60.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -154,6 +158,11 @@ class NpcState:
             "persona": self.persona,
             "pronunciatio": self.memory.scratch.act_pronunciatio,
             "act_event": list(self.memory.scratch.act_event) if self.memory.scratch.act_event else None,
+            "physiology": {
+                "energy": round(float(self.energy), 2),
+                "satiety": round(float(self.satiety), 2),
+                "mood": round(float(self.mood), 2),
+            },
         }
 
 
@@ -509,6 +518,11 @@ class SimulationRunner:
             return matched
         return list(town.location_points)
 
+    @staticmethod
+    def _gravity_score(attractiveness: float, distance: int, beta: float = 1.5) -> float:
+        """Gravity model: score = attractiveness / distance^beta."""
+        return attractiveness / max(1.0, float(distance)) ** beta
+
     def _choose_location_goal(
         self,
         *,
@@ -533,25 +547,502 @@ class SimulationRunner:
         elif schedule_item:
             target_affordance = schedule_item.affordance_hint
 
-        candidates = self._locations_by_affordance(town=town, affordance=target_affordance)
+        reason = schedule_item.description if schedule_item else normalized_scope
+        return self._choose_location_goal_for_affordance(
+            town=town,
+            npc=npc,
+            affordance=target_affordance,
+            reason=str(reason),
+            long_term=(normalized_scope == "long_term_plan"),
+        )
+
+    def _choose_location_goal_for_affordance(
+        self,
+        *,
+        town: TownRuntime,
+        npc: NpcState,
+        affordance: str | None,
+        reason: str,
+        long_term: bool = False,
+        exclude: set[tuple[int, int]] | None = None,
+    ) -> tuple[int, int, str, str | None] | None:
+        candidates = self._locations_by_affordance(town=town, affordance=affordance)
         if not candidates:
             return None
-
-        def score(loc: MapLocationPoint) -> tuple[int, int, int]:
+        excluded = exclude or set()
+        if excluded:
+            filtered = [loc for loc in candidates if (int(loc.x), int(loc.y)) not in excluded]
+            if filtered:
+                candidates = filtered
+        rng = _random_mod.Random(f"{npc.agent_id}:{town.step}:{affordance or 'any'}:{reason}")
+        weights: list[float] = []
+        for loc in candidates:
             label = loc.label()
             visits = int(npc.memory.known_places.get(label, 0))
             dist = self._manhattan(npc.x, npc.y, loc.x, loc.y)
-            tie = self._hash_int(f"{npc.agent_id}:{loc.name}:{town.step}") % 1000
-            if normalized_scope == "long_term_plan":
-                return (visits, -dist, tie)
-            return (visits, dist, tie)
-
-        chosen = sorted(candidates, key=score)[0]
-        reason = schedule_item.description if schedule_item else normalized_scope
+            if long_term:
+                attractiveness = max(0.5, float(visits + 1))
+            else:
+                attractiveness = max(0.5, 10.0 - visits)
+            weights.append(self._gravity_score(attractiveness, dist))
+        total = sum(weights)
+        if total <= 0:
+            chosen = candidates[0]
+        else:
+            chosen = rng.choices(candidates, weights=weights, k=1)[0]
         final_x, final_y = self._avoid_occupied_tile(
-            town=town, npc=npc, target=(chosen.x, chosen.y)
+            town=town,
+            npc=npc,
+            target=(chosen.x, chosen.y),
         )
-        return (final_x, final_y, str(reason), target_affordance)
+        return (final_x, final_y, str(reason), affordance)
+
+    # ── Needs-based autopilot pre-filter ──────────────────────
+
+    _ROUTINE_AFFORDANCES: frozenset[str] = frozenset({"home", "food", "work"})
+
+    def _needs_based_prefilter(
+        self,
+        *,
+        town: TownRuntime,
+        npc: NpcState,
+        scope: str,
+        nearby_agents: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Short-circuit routine autopilot decisions that don't need LLM.
+
+        Returns a pre-built action dict when the current schedule affordance
+        is physiological/safety (home, food, work) and no social opportunity
+        is present.  Returns *None* when LLM planning is needed.
+        """
+        schedule_item = npc.memory.scratch.current_schedule_item(
+            step=town.step,
+            step_minutes=max(1, int(town.step_minutes)),
+        )
+        affordance = getattr(schedule_item, "affordance_hint", None) if schedule_item else None
+        if affordance not in self._ROUTINE_AFFORDANCES:
+            return None
+        if nearby_agents:
+            return None
+
+        location_goal = self._choose_location_goal(town=town, npc=npc, scope=scope)
+        if location_goal is None:
+            return None
+
+        goal_x, goal_y, description, goal_affordance = location_goal
+        return {
+            "target_x": goal_x,
+            "target_y": goal_y,
+            "description": description,
+            "affordance": goal_affordance,
+            "prefilter": True,
+        }
+
+    @staticmethod
+    def _clamp_pct(value: float) -> float:
+        return max(0.0, min(100.0, float(value)))
+
+    def _personal_urgency(self, *, npc: NpcState) -> float:
+        energy_urgency = max(0.0, (40.0 - float(npc.energy)) / 40.0)
+        satiety_urgency = max(0.0, (30.0 - float(npc.satiety)) / 30.0)
+        mood_urgency = max(0.0, (25.0 - float(npc.mood)) / 25.0)
+        return max(energy_urgency, satiety_urgency, mood_urgency)
+
+    def _objective_bias(self, *, objective: str | None, branch: str) -> float:
+        text = str(objective or "").strip().lower()
+        if not text:
+            return 0.0
+        if branch == "social" and any(key in text for key in ("social", "friend", "community", "relationship")):
+            return 0.6
+        if branch == "routine" and any(key in text for key in ("work", "job", "routine", "career", "responsibility")):
+            return 0.5
+        if branch == "exploration" and any(key in text for key in ("explore", "discover", "learn", "study")):
+            return 0.45
+        if branch == "personal" and any(key in text for key in ("rest", "health", "recover", "wellbeing")):
+            return 0.6
+        return 0.0
+
+    def _prioritize_branches(
+        self,
+        *,
+        town: TownRuntime,
+        npc: NpcState,
+        step: int,
+        nearby_agents: list[dict[str, Any]],
+        schedule_item: Any,
+        cognition_planner: Any = None,
+    ) -> tuple[str, str, str | None, dict[str, float]]:
+        """Score branch candidates and return best branch + branch reason + affordance."""
+        npc.memory.scratch.ensure_default_branches()
+        branch_weight_map = {
+            branch.name: max(0.1, float(branch.priority_weight))
+            for branch in npc.memory.scratch.planning_branches
+        }
+        has_nearby = bool(nearby_agents)
+        step_minutes = max(1, int(town.step_minutes))
+        social_recency_steps = max(1, int(step) - int(npc.memory.scratch.last_social_step))
+        social_recency_minutes = social_recency_steps * step_minutes
+        exploration_threshold_steps = max(1, int(150 / step_minutes))
+        routine_affordance = schedule_item.affordance_hint if schedule_item is not None else None
+        routine_reason = str(schedule_item.description) if schedule_item is not None else "routine"
+
+        scores: dict[str, float] = {
+            "personal": 0.2 + self._personal_urgency(npc=npc),
+            "social": (0.6 if has_nearby else 0.1) * min(float(social_recency_minutes) / 200.0, 1.5),
+            "routine": 0.5,
+            "exploration": 0.3
+            * (
+                1.0
+                if int(npc.memory.scratch.steps_at_current_location) > exploration_threshold_steps
+                else 0.2
+            ),
+        }
+        for branch_name in list(scores.keys()):
+            scores[branch_name] *= float(branch_weight_map.get(branch_name, 1.0))
+            scores[branch_name] += self._objective_bias(
+                objective=npc.memory.scratch.long_term_objective,
+                branch=branch_name,
+            )
+
+        selected_branch = max(scores, key=scores.get)
+        selected_reason = "routine"
+        selected_affordance: str | None = routine_affordance
+
+        # Optional LLM enrichment for branch choice.
+        if cognition_planner is not None and hasattr(cognition_planner, "contextual_prioritize"):
+            try:
+                context = {
+                    "town_id": town.town_id,
+                    "step": step,
+                    "agent_id": npc.agent_id,
+                    "agent_name": npc.name,
+                    "identity": npc.memory.scratch.get_str_iss(),
+                    "position": {"x": npc.x, "y": npc.y},
+                    "current_location": npc.current_location,
+                    "schedule": {
+                        "description": routine_reason,
+                        "affordance_hint": routine_affordance,
+                    },
+                    "nearby_agents": nearby_agents[:4],
+                    "branch_scores": scores,
+                    "recent_memories": [
+                        str(item.get("description") or "")
+                        for item in npc.memory.retrieve_ranked(
+                            focal_text="branch planning",
+                            step=step,
+                            limit=6,
+                            retrieval_mode="long_term",
+                        )
+                    ],
+                }
+                result = cognition_planner.contextual_prioritize(context)
+                branch_candidate = str(result.get("branch") or "").strip().lower()
+                if result.get("route") != "heuristic" and branch_candidate in scores:
+                    selected_branch = branch_candidate
+                    selected_reason = str(result.get("reason") or selected_branch)
+            except Exception:
+                pass
+
+        if not selected_reason or selected_reason == "routine":
+            if selected_branch == "personal":
+                if float(npc.satiety) < 30.0:
+                    selected_reason = "restore_satiety"
+                    selected_affordance = "food"
+                elif float(npc.energy) < 40.0:
+                    selected_reason = "recover_energy"
+                    selected_affordance = "home"
+                elif float(npc.mood) < 25.0:
+                    selected_reason = "recover_mood"
+                    selected_affordance = "leisure"
+                else:
+                    selected_reason = "maintain_wellbeing"
+                    selected_affordance = "home"
+            elif selected_branch == "social":
+                selected_reason = "socialize_with_neighbors" if has_nearby else "seek_social_contact"
+                selected_affordance = "social"
+            elif selected_branch == "exploration":
+                selected_reason = "explore_new_places"
+                selected_affordance = "leisure"
+            else:
+                selected_reason = routine_reason
+                selected_affordance = routine_affordance
+
+        npc.memory.scratch.active_branch = selected_branch
+        for branch in npc.memory.scratch.planning_branches:
+            if branch.name == selected_branch:
+                branch.last_active_step = int(step)
+                break
+        if selected_branch != "routine":
+            npc.memory.scratch.schedule_override_reason = selected_reason
+        else:
+            npc.memory.scratch.schedule_override_reason = None
+
+        return (selected_branch, selected_reason, selected_affordance, scores)
+
+    @staticmethod
+    def _extract_affordance_from_reason(reason: str | None) -> str | None:
+        value = str(reason or "").strip().lower()
+        if not value:
+            return None
+        if any(token in value for token in ("social", "talk", "chat")):
+            return "social"
+        if any(token in value for token in ("eat", "food", "lunch", "dinner", "satiety")):
+            return "food"
+        if any(token in value for token in ("work", "task", "job", "career")):
+            return "work"
+        if any(token in value for token in ("home", "sleep", "rest", "energy")):
+            return "home"
+        if any(token in value for token in ("leisure", "relax", "explore", "mood")):
+            return "leisure"
+        return None
+
+    def _agents_near(
+        self,
+        *,
+        town: TownRuntime,
+        x: int,
+        y: int,
+        radius: int,
+        exclude_agent_id: str | None = None,
+    ) -> list[NpcState]:
+        out: list[NpcState] = []
+        for other in town.npcs.values():
+            if exclude_agent_id and other.agent_id == exclude_agent_id:
+                continue
+            if self._manhattan(x, y, other.x, other.y) <= max(0, int(radius)):
+                out.append(other)
+        return out
+
+    def _is_reachable(
+        self,
+        *,
+        town: TownRuntime,
+        start: tuple[int, int],
+        target: tuple[int, int],
+    ) -> bool:
+        sx, sy = start
+        tx, ty = target
+        if (sx, sy) == (tx, ty):
+            return True
+        if tx < 0 or ty < 0 or tx >= town.width or ty >= town.height:
+            return False
+        if not town.walkable[ty][tx]:
+            return False
+        queue: deque[tuple[int, int]] = deque()
+        queue.append((sx, sy))
+        seen: set[tuple[int, int]] = {(sx, sy)}
+        while queue:
+            cx, cy = queue.popleft()
+            for nx, ny in self._neighbors4(town=town, x=cx, y=cy):
+                if (nx, ny) in seen:
+                    continue
+                if (nx, ny) == (tx, ty):
+                    return True
+                seen.add((nx, ny))
+                queue.append((nx, ny))
+        return False
+
+    def _find_alternative_goal(
+        self,
+        *,
+        town: TownRuntime,
+        npc: NpcState,
+        reason: str | None,
+        exclude: set[tuple[int, int]] | None = None,
+    ) -> tuple[int, int, str] | None:
+        affordance = self._extract_affordance_from_reason(reason)
+        if not affordance:
+            schedule_item = npc.memory.scratch.current_schedule_item(
+                step=town.step,
+                step_minutes=max(1, int(town.step_minutes)),
+            )
+            if schedule_item is not None:
+                affordance = schedule_item.affordance_hint
+        goal = self._choose_location_goal_for_affordance(
+            town=town,
+            npc=npc,
+            affordance=affordance,
+            reason=str(reason or "alternative_goal"),
+            long_term=False,
+            exclude=exclude,
+        )
+        if goal is None:
+            return None
+        return (int(goal[0]), int(goal[1]), f"{goal[2]} (alternative)")
+
+    def _validate_goal(
+        self,
+        *,
+        town: TownRuntime,
+        npc: NpcState,
+        goal_x: int,
+        goal_y: int,
+        reason: str,
+        step: int,
+    ) -> tuple[int, int, str, list[str]] | None:
+        issues: list[str] = []
+        if not self._is_reachable(
+            town=town,
+            start=(npc.x, npc.y),
+            target=(int(goal_x), int(goal_y)),
+        ):
+            issues.append("unreachable")
+        recent_locations = list(npc.memory.scratch.recent_goal_locations[-3:])
+        if (int(goal_x), int(goal_y)) in recent_locations:
+            issues.append("repetitive")
+        if "social" in str(reason).lower():
+            nearby = self._agents_near(
+                town=town,
+                x=int(goal_x),
+                y=int(goal_y),
+                radius=3,
+                exclude_agent_id=npc.agent_id,
+            )
+            if not nearby:
+                issues.append("no_social_targets")
+        if abs(int(npc.x) - int(goal_x)) <= 1 and abs(int(npc.y) - int(goal_y)) <= 1:
+            issues.append("already_there")
+
+        if not issues:
+            return (int(goal_x), int(goal_y), str(reason), [])
+
+        alternative = self._find_alternative_goal(
+            town=town,
+            npc=npc,
+            reason=reason,
+            exclude={(int(goal_x), int(goal_y))},
+        )
+        if alternative is not None:
+            return (alternative[0], alternative[1], alternative[2], issues)
+        return None
+
+    def _walkable_tiles_near(
+        self,
+        *,
+        town: TownRuntime,
+        x: int,
+        y: int,
+        radius: int,
+    ) -> list[tuple[int, int]]:
+        out: list[tuple[int, int]] = []
+        for ny in range(max(0, y - radius), min(town.height, y + radius + 1)):
+            for nx in range(max(0, x - radius), min(town.width, x + radius + 1)):
+                if not town.walkable[ny][nx]:
+                    continue
+                if self._manhattan(x, y, nx, ny) > radius:
+                    continue
+                out.append((nx, ny))
+        return out
+
+    def _location_from_description(self, *, town: TownRuntime, description: str) -> tuple[int, int] | None:
+        match = re.search(r"\((\d+),(\d+)\)", str(description))
+        if match:
+            try:
+                return (int(match.group(1)), int(match.group(2)))
+            except Exception:
+                return None
+        lowered = str(description).lower()
+        for location in town.location_points:
+            if str(location.name).lower() in lowered:
+                return (int(location.x), int(location.y))
+        return None
+
+    def _recover_from_failure(
+        self,
+        *,
+        town: TownRuntime,
+        npc: NpcState,
+        step: int,
+        failed_reason: str,
+        current_affordance: str | None = None,
+    ) -> tuple[int, int, str] | None:
+        recent_success_nodes = [
+            npc.memory.id_to_node.get(node_id)
+            for node_id in npc.memory.seq_event[-10:]
+        ]
+        for node in reversed([item for item in recent_success_nodes if item is not None]):
+            if "moves from" not in str(node.description).lower():
+                continue
+            loc = self._location_from_description(town=town, description=node.description)
+            if loc is None:
+                continue
+            validated = self._validate_goal(
+                town=town,
+                npc=npc,
+                goal_x=loc[0],
+                goal_y=loc[1],
+                reason="retry from memory",
+                step=step,
+            )
+            if validated is not None:
+                return (validated[0], validated[1], "retry_from_memory")
+
+        affordance_reason = current_affordance or failed_reason
+        alternative = self._find_alternative_goal(
+            town=town,
+            npc=npc,
+            reason=affordance_reason,
+            exclude={(npc.goal_x, npc.goal_y)} if npc.goal_x is not None and npc.goal_y is not None else None,
+        )
+        if alternative is not None:
+            return alternative
+
+        nearby_walkable = self._walkable_tiles_near(
+            town=town,
+            x=npc.x,
+            y=npc.y,
+            radius=8,
+        )
+        if nearby_walkable:
+            rng = _random_mod.Random(f"recover:{npc.agent_id}:{step}")
+            tx, ty = rng.choice(nearby_walkable)
+            return (int(tx), int(ty), "exploring_nearby")
+        return None
+
+    def _apply_physiology_tick(
+        self,
+        *,
+        npc: NpcState,
+        moved: bool,
+        action_description: str | None,
+    ) -> None:
+        desc = str(action_description or "").lower()
+        energy = float(npc.energy)
+        satiety = float(npc.satiety)
+        mood = float(npc.mood)
+
+        satiety -= 0.3
+        mood -= 0.1
+        if moved:
+            energy -= 0.3
+            satiety -= 0.1
+        if any(token in desc for token in ("chat", "talk", "social", "conversation")):
+            energy -= 0.1
+            satiety -= 0.1
+            mood += 2.0
+        elif any(token in desc for token in ("work", "task", "study", "job")):
+            energy -= 1.0
+            satiety -= 0.5
+            mood -= 0.2
+        elif any(token in desc for token in ("eat", "lunch", "dinner", "food", "cafe", "pub")):
+            energy += 0.5
+            satiety += 8.0
+            mood += 0.5
+        elif any(token in desc for token in ("sleep", "bed", "resting")):
+            energy += 3.0
+            satiety -= 0.2
+            mood += 0.5
+        elif any(token in desc for token in ("leisure", "relax", "park", "read", "paint", "play")):
+            energy -= 0.2
+            satiety -= 0.1
+            mood += 1.5
+        elif "idle" in desc or "wait" in desc:
+            energy += 1.0
+            satiety -= 0.1
+
+        npc.energy = self._clamp_pct(energy)
+        npc.satiety = self._clamp_pct(satiety)
+        npc.mood = self._clamp_pct(mood)
 
     def _goal_from_relationship(
         self,
@@ -928,6 +1419,9 @@ class SimulationRunner:
             "goal_reason": npc.goal_reason,
             "sprite_name": npc.sprite_name,
             "persona": npc.persona,
+            "energy": float(npc.energy),
+            "satiety": float(npc.satiety),
+            "mood": float(npc.mood),
             "memory": npc.memory.export_state(),
         }
 
@@ -946,6 +1440,7 @@ class SimulationRunner:
             memory = AgentMemory.bootstrap(agent_id=agent_id, agent_name=name, step=int(raw.get("last_step") or 0))
         memory.agent_id = agent_id
         memory.agent_name = name
+        memory.scratch.ensure_default_branches()
         try:
             x = int(raw.get("x") or 0)
         except Exception:
@@ -972,6 +1467,18 @@ class SimulationRunner:
                 goal_y = int(goal_y_value)
             except Exception:
                 goal_y = None
+        try:
+            energy = float(raw.get("energy") if raw.get("energy") is not None else 80.0)
+        except Exception:
+            energy = 80.0
+        try:
+            satiety = float(raw.get("satiety") if raw.get("satiety") is not None else 70.0)
+        except Exception:
+            satiety = 70.0
+        try:
+            mood = float(raw.get("mood") if raw.get("mood") is not None else 60.0)
+        except Exception:
+            mood = 60.0
         return NpcState(
             agent_id=agent_id,
             name=name,
@@ -989,6 +1496,9 @@ class SimulationRunner:
             goal_reason=(str(raw.get("goal_reason")) if raw.get("goal_reason") is not None else None),
             sprite_name=(str(raw.get("sprite_name")) if raw.get("sprite_name") is not None else None),
             persona=(raw.get("persona") if isinstance(raw.get("persona"), dict) else None),
+            energy=max(0.0, min(100.0, energy)),
+            satiety=max(0.0, min(100.0, satiety)),
+            mood=max(0.0, min(100.0, mood)),
         )
 
     def _serialize_runtime(self, runtime: TownRuntime) -> dict[str, Any]:
@@ -1532,6 +2042,19 @@ class SimulationRunner:
             return None
 
         try:
+            # Build arena/object position lookups for heuristic fallback
+            arena_positions: dict[str, tuple[int, int]] = {}
+            object_positions: dict[str, tuple[int, int]] = {}
+            for sec in sectors:
+                for arena_name in spatial.arenas_in_sector(sec):
+                    tile = spatial.find_tile_for_arena(sec, arena_name) if hasattr(spatial, "find_tile_for_arena") else None
+                    if tile:
+                        arena_positions[arena_name] = tile
+                    for obj_name in spatial.objects_in_arena(sec, arena_name):
+                        obj_tile = spatial.find_tile_for_object(sec, arena_name, obj_name)
+                        if obj_tile:
+                            object_positions[obj_name] = obj_tile
+
             result = cognition.resolve_action_address({
                 "agent_id": npc.agent_id,
                 "agent_name": npc.name,
@@ -1541,6 +2064,10 @@ class SimulationRunner:
                 "living_area": npc.memory.scratch.living_area or "",
                 "available_sectors": sectors,
                 "spatial_memory": list(npc.memory.spatial.tree.keys())[:10],
+                "agent_x": npc.x,
+                "agent_y": npc.y,
+                "arena_positions": arena_positions,
+                "object_positions": object_positions,
             })
 
             target_sector = str(result.get("action_sector") or "")
@@ -2233,6 +2760,24 @@ class SimulationRunner:
             return target
         return None
 
+    @staticmethod
+    def _compute_decision_complexity(
+        *,
+        schedule_item: Any,
+        nearby_agents: list[dict[str, Any]],
+        conversation: dict[str, Any] | None,
+        active_action: dict[str, Any] | None,
+    ) -> str:
+        """Classify current situation as 'routine', 'social', or 'complex'."""
+        if conversation and conversation.get("awaiting_reply"):
+            return "complex"
+        if nearby_agents:
+            if schedule_item and getattr(schedule_item, "affordance_hint", None) == "social":
+                return "social"
+            if len(nearby_agents) >= 2:
+                return "social"
+        return "routine"
+
     def _context_for_npc(self, *, town: TownRuntime, npc: NpcState, planning_scope: str) -> dict[str, Any]:
         self._update_location_memory(town=town, npc=npc, step=town.step)
         perception = self._perceive_nearby_agents_preview(town=town, npc=npc)
@@ -2242,11 +2787,16 @@ class SimulationRunner:
         for other in perception["nearby_agents"]:
             focal_parts.append(str(other.get("status") or "idle"))
         focal_text = " ".join(i for i in focal_parts if i)
-        retrieved = npc.memory.retrieve_ranked(
+        retrieval_mode = "long_term" if self._normalize_scope(planning_scope) == "long_term_plan" else "short_term"
+        streams = npc.memory.retrieve_ranked_by_stream(
             focal_text=focal_text,
             step=town.step,
             limit=6,
+            retrieval_mode=retrieval_mode,
         )
+        event_stream = streams["event_stream"]
+        perception_stream = streams["perception_stream"]
+        retrieved = event_stream + perception_stream
 
         goal_x: int | None = None
         goal_y: int | None = None
@@ -2293,6 +2843,16 @@ class SimulationRunner:
             location_arena = spatial.arena_at(npc.x, npc.y)
             location_object = spatial.object_at(npc.x, npc.y)
 
+        # Decision complexity hint for model routing
+        conv_ctx = self._conversation_context_for_agent(town=town, npc=npc)
+        active_action_data = town.active_actions.get(npc.agent_id)
+        decision_complexity = self._compute_decision_complexity(
+            schedule_item=schedule_item,
+            nearby_agents=perception.get("nearby_agents", []),
+            conversation=conv_ctx,
+            active_action=active_action_data,
+        )
+
         return {
             "town_id": town.town_id,
             "step": town.step,
@@ -2302,7 +2862,14 @@ class SimulationRunner:
             "persona": npc.persona,
             "identity": npc.memory.scratch.get_str_iss(),
             "planning_scope": planning_scope,
+            "long_term_objective": npc.memory.scratch.long_term_objective,
+            "active_branch": npc.memory.scratch.active_branch,
             "position": {"x": npc.x, "y": npc.y},
+            "physiology": {
+                "energy": round(float(npc.energy), 2),
+                "satiety": round(float(npc.satiety), 2),
+                "mood": round(float(npc.mood), 2),
+            },
             "map": {"width": town.width, "height": town.height},
             "goal_hint": {
                 "x": goal_x,
@@ -2314,11 +2881,14 @@ class SimulationRunner:
             "memory": {
                 "summary": npc.memory.summary(),
                 "retrieved": retrieved,
+                "event_stream": event_stream,
+                "perception_stream": perception_stream,
             },
             "schedule": schedule,
             "location_sector": location_sector,
             "location_arena": location_arena,
             "location_object": location_object,
+            "decision_complexity": decision_complexity,
         }
 
     def _conversation_context_for_agent(self, *, town: TownRuntime, npc: NpcState) -> dict[str, Any] | None:
@@ -2600,6 +3170,176 @@ class SimulationRunner:
                 decrement_trigger=False,
             )
 
+    def _update_social_attitude(
+        self,
+        *,
+        npc: NpcState,
+        partner: NpcState,
+        conversation_summary: str,
+        step: int,
+        cognition_planner: Any = None,
+    ) -> tuple[str, float]:
+        current_attitude = npc.memory.scratch.social_attitudes.get(partner.name, "neutral")
+        summary_lower = str(conversation_summary or "").lower()
+        attitude = current_attitude
+        relationship_delta = 1.0
+
+        if any(token in summary_lower for token in ("argue", "conflict", "angry", "distrust", "lie", "deceive")):
+            attitude = "wary"
+            relationship_delta = -1.2
+        elif any(token in summary_lower for token in ("warm", "friendly", "supportive", "helpful", "good chat")):
+            attitude = "trusting"
+            relationship_delta = 1.8
+        else:
+            attitude = "neutral"
+            relationship_delta = 0.6
+
+        if cognition_planner is not None and hasattr(cognition_planner, "assess_social_attitude"):
+            try:
+                result = cognition_planner.assess_social_attitude(
+                    {
+                        "town_id": npc.memory.town_id or "",
+                        "step": step,
+                        "agent_id": npc.agent_id,
+                        "agent_name": npc.name,
+                        "partner_name": partner.name,
+                        "conversation_summary": conversation_summary,
+                        "current_attitude": current_attitude,
+                        "relationship_score": npc.memory.relationship_scores.get(partner.agent_id, 0.0),
+                    }
+                )
+                maybe_attitude = str(result.get("attitude") or "").strip()
+                if maybe_attitude:
+                    attitude = maybe_attitude
+                if result.get("relationship_delta") is not None:
+                    try:
+                        relationship_delta = float(result.get("relationship_delta"))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        return (attitude, relationship_delta)
+
+    def _maybe_evolve_identity(
+        self,
+        *,
+        npc: NpcState,
+        step: int,
+        step_minutes: int,
+        cognition_planner: Any = None,
+    ) -> dict[str, Any] | None:
+        interactions = int(npc.memory.scratch.social_interactions_count)
+        if interactions < 5:
+            return None
+        interval_steps = max(1, int((4 * 60) / max(1, int(step_minutes))))
+        if int(step) - int(npc.memory.scratch.last_identity_update_step) < interval_steps:
+            return None
+
+        recent_social = npc.memory.retrieve_by_kind(kind="chat", limit=10)
+        recent_reflections = npc.memory.retrieve_by_kind(kind="reflection", limit=5)
+        if not recent_social:
+            return None
+
+        updated_traits = list(npc.memory.scratch.evolving_traits)
+        updated_habits = list(npc.memory.scratch.evolving_habits)
+        updated_values = list(npc.memory.scratch.evolving_values)
+        updated_attitudes = dict(npc.memory.scratch.social_attitudes)
+        evolution_narrative = f"{npc.name} integrates recent social experiences into identity."
+
+        if cognition_planner is not None and hasattr(cognition_planner, "evolve_identity"):
+            try:
+                result = cognition_planner.evolve_identity(
+                    {
+                        "town_id": npc.memory.town_id or "",
+                        "step": step,
+                        "agent_id": npc.agent_id,
+                        "agent_name": npc.name,
+                        "current_traits": updated_traits,
+                        "current_habits": updated_habits,
+                        "current_values": updated_values,
+                        "social_attitudes": updated_attitudes,
+                        "recent_conversations": [node.description for node in recent_social],
+                        "recent_reflections": [node.description for node in recent_reflections],
+                    }
+                )
+                llm_traits = [str(item) for item in (result.get("updated_traits") or []) if str(item).strip()]
+                llm_habits = [str(item) for item in (result.get("updated_habits") or []) if str(item).strip()]
+                llm_values = [str(item) for item in (result.get("updated_values") or []) if str(item).strip()]
+                llm_attitudes_raw = result.get("updated_attitudes") or {}
+                if llm_traits:
+                    updated_traits = llm_traits[:8]
+                if llm_habits:
+                    updated_habits = llm_habits[:8]
+                if llm_values:
+                    updated_values = llm_values[:8]
+                if isinstance(llm_attitudes_raw, dict):
+                    for key, value in llm_attitudes_raw.items():
+                        if str(key).strip() and str(value).strip():
+                            updated_attitudes[str(key)] = str(value)
+                narrative = str(result.get("evolution_narrative") or "").strip()
+                if narrative:
+                    evolution_narrative = narrative
+            except Exception:
+                pass
+        else:
+            positive_attitudes = sum(
+                1
+                for value in updated_attitudes.values()
+                if any(token in str(value).lower() for token in ("trust", "friendly", "warm", "supportive"))
+            )
+            negative_attitudes = sum(
+                1
+                for value in updated_attitudes.values()
+                if any(token in str(value).lower() for token in ("wary", "distrust", "avoid", "conflict"))
+            )
+            if positive_attitudes >= max(2, negative_attitudes + 1) and "community-minded" not in updated_values:
+                updated_values.append("community-minded")
+            if negative_attitudes >= 2 and "cautious" not in updated_traits:
+                updated_traits.append("cautious")
+            if interactions >= 8 and "regular social check-ins" not in updated_habits:
+                updated_habits.append("regular social check-ins")
+
+        if not updated_traits and npc.memory.scratch.innate:
+            updated_traits = [item.strip() for item in str(npc.memory.scratch.innate).split(",") if item.strip()]
+        changed = (
+            updated_traits != npc.memory.scratch.evolving_traits
+            or updated_habits != npc.memory.scratch.evolving_habits
+            or updated_values != npc.memory.scratch.evolving_values
+            or updated_attitudes != npc.memory.scratch.social_attitudes
+        )
+        if not changed:
+            npc.memory.scratch.social_interactions_count = 0
+            npc.memory.scratch.last_identity_update_step = int(step)
+            return None
+
+        npc.memory.scratch.evolving_traits = updated_traits
+        npc.memory.scratch.evolving_habits = updated_habits
+        npc.memory.scratch.evolving_values = updated_values
+        npc.memory.scratch.social_attitudes = updated_attitudes
+        npc.memory.scratch.identity_version = int(npc.memory.scratch.identity_version) + 1
+        npc.memory.scratch.last_identity_update_step = int(step)
+        npc.memory.scratch.social_interactions_count = 0
+
+        node = npc.memory.add_node(
+            kind="thought",
+            step=step,
+            subject=npc.name,
+            predicate="identity_evolves",
+            object="self",
+            description=evolution_narrative,
+            poignancy=7,
+            decrement_trigger=False,
+            memory_tier="ltm",
+        )
+        return {
+            "step": int(step),
+            "type": "identity_evolution",
+            "agent_id": npc.agent_id,
+            "name": npc.name,
+            "node": node.as_dict(),
+        }
+
     def _ingest_social_events(self, *, town: TownRuntime, social_events: list[dict[str, Any]], step: int) -> None:
         for event in social_events:
             if str(event.get("type") or "social") != "social":
@@ -2627,12 +3367,31 @@ class SimulationRunner:
             total_chars = sum(len(line) for _, line in transcript)
             convo_duration_mins = max(10, total_chars // 30)
 
+            transcript_summary = " | ".join(f"{speaker}: {line}" for speaker, line in transcript[-4:])
+            conversation_summary = message or transcript_summary or f"{a.name} and {b.name} talked."
+            a_attitude, a_delta = self._update_social_attitude(
+                npc=a,
+                partner=b,
+                conversation_summary=conversation_summary,
+                step=step,
+                cognition_planner=getattr(a.memory, "cognition", None),
+            )
+            b_attitude, b_delta = self._update_social_attitude(
+                npc=b,
+                partner=a,
+                conversation_summary=conversation_summary,
+                step=step,
+                cognition_planner=getattr(b.memory, "cognition", None),
+            )
+
             a.memory.add_social_interaction(
                 step=step,
                 target_agent_id=b.agent_id,
                 target_name=b.name,
                 message=message,
                 transcript=transcript,
+                relationship_delta=a_delta,
+                attitude=a_attitude,
             )
             b.memory.add_social_interaction(
                 step=step,
@@ -2640,6 +3399,8 @@ class SimulationRunner:
                 target_name=a.name,
                 message=message,
                 transcript=transcript,
+                relationship_delta=b_delta,
+                attitude=b_attitude,
             )
 
             # Recompose schedules for both participants after chat interruption
@@ -2657,7 +3418,10 @@ class SimulationRunner:
     def _run_reflection_cycle(self, *, town: TownRuntime, step: int) -> list[dict[str, Any]]:
         reflection_events: list[dict[str, Any]] = []
         for npc in sorted(town.npcs.values(), key=lambda n: n.agent_id):
-            reflections = npc.memory.maybe_reflect(step=step)
+            reflections = npc.memory.maybe_reflect(
+                step=step,
+                step_minutes=max(1, int(town.step_minutes)),
+            )
             for node in reflections:
                 reflection_events.append(
                     {
@@ -2668,6 +3432,14 @@ class SimulationRunner:
                         "node": node.as_dict(),
                     }
                 )
+            identity_event = self._maybe_evolve_identity(
+                npc=npc,
+                step=step,
+                step_minutes=max(1, int(town.step_minutes)),
+                cognition_planner=getattr(npc.memory, "cognition", None),
+            )
+            if identity_event is not None:
+                reflection_events.append(identity_event)
         return reflection_events
 
     def evict_agent(self, *, town_id: str, agent_id: str) -> None:
@@ -2868,6 +3640,7 @@ class SimulationRunner:
                     ),
                 )
                 runtime.npcs[agent_id].memory.set_position(x=spawn_x, y=spawn_y, step=runtime.step)
+                runtime.npcs[agent_id].memory.scratch.ensure_default_branches()
                 # Inject arrival event into existing agents' memories
                 for other_id, other_npc in runtime.npcs.items():
                     if other_id == agent_id:
@@ -2892,6 +3665,7 @@ class SimulationRunner:
             npc.joined_at = member.get("joined_at")
             npc.memory.agent_name = npc.name
             npc.memory.set_position(x=npc.x, y=npc.y, step=runtime.step)
+            npc.memory.scratch.ensure_default_branches()
 
         runtime.updated_at = _utc_now()
         return runtime
@@ -2956,6 +3730,9 @@ class SimulationRunner:
             f"{npc.x},{npc.y}",
             npc.status or "idle",
             npc.current_location or "",
+            f"phy:{int(npc.energy)}:{int(npc.satiety)}:{int(npc.mood)}",
+            f"branch:{npc.memory.scratch.active_branch}",
+            f"objective:{npc.memory.scratch.long_term_objective or ''}",
         ]
 
         # Nearby agents (same lightweight scan as context)
@@ -3081,6 +3858,31 @@ class SimulationRunner:
         runtime.active_actions.pop(npc.agent_id, None)
         runtime.pending_actions[npc.agent_id] = normalized
         runtime.social_wait_states.pop(npc.agent_id, None)
+        action_summary_parts: list[str] = []
+        goal_reason = str(normalized.get("goal_reason") or "").strip()
+        if goal_reason:
+            action_summary_parts.append(f"goal={goal_reason}")
+        if normalized.get("target_x") is not None and normalized.get("target_y") is not None:
+            action_summary_parts.append(f"target=({int(normalized['target_x'])},{int(normalized['target_y'])})")
+        socials = self._pending_social_items(action=normalized)
+        if socials:
+            action_summary_parts.append(f"social_targets={len(socials)}")
+        if normalized.get("dx") is not None or normalized.get("dy") is not None:
+            action_summary_parts.append(
+                f"delta=({int(normalized.get('dx') or 0)},{int(normalized.get('dy') or 0)})"
+            )
+        summary = ", ".join(action_summary_parts) if action_summary_parts else "no explicit target"
+        npc.memory.add_node(
+            kind="event",
+            step=runtime.step,
+            subject=npc.name,
+            predicate="receives_temporary_command",
+            object="external_action",
+            description=f"{npc.name} receives a temporary command: {summary}.",
+            poignancy=4,
+            decrement_trigger=False,
+            memory_tier="stm",
+        )
         runtime.updated_at = _utc_now()
         self._persist_runtime(runtime)
         return {
@@ -3089,6 +3891,49 @@ class SimulationRunner:
             "step": runtime.step,
             "agent_id": npc.agent_id,
             "queued_action": self._clean_action_for_output(normalized),
+        }
+
+    def set_agent_objective(
+        self,
+        *,
+        town_id: str,
+        active_version: dict[str, Any],
+        map_data: dict[str, Any],
+        members: list[dict[str, Any]],
+        agent_id: str,
+        objective: str,
+    ) -> dict[str, Any] | None:
+        runtime = self.sync_town(
+            town_id=town_id,
+            active_version=active_version,
+            map_data=map_data,
+            members=members,
+        )
+        npc = runtime.npcs.get(str(agent_id))
+        if not npc:
+            return None
+        normalized = str(objective or "").strip()
+        npc.memory.scratch.long_term_objective = normalized or None
+        if normalized:
+            npc.memory.add_node(
+                kind="thought",
+                step=runtime.step,
+                subject=npc.name,
+                predicate="sets_objective",
+                object="long_term",
+                description=f"{npc.name} commits to this long-term objective: {normalized}",
+                poignancy=8,
+                decrement_trigger=False,
+                memory_tier="ltm",
+            )
+        runtime.updated_at = _utc_now()
+        self._persist_runtime(runtime)
+        return {
+            "ok": True,
+            "town_id": runtime.town_id,
+            "step": runtime.step,
+            "agent_id": npc.agent_id,
+            "objective": npc.memory.scratch.long_term_objective,
         }
 
     def tick(
@@ -3194,9 +4039,11 @@ class SimulationRunner:
                     focal_text=focal_text,
                     step=runtime.step,
                     limit=6,
+                    retrieval_mode="long_term" if self._normalize_scope(planning_scope) == "long_term_plan" else "short_term",
                 )
 
                 from_x, from_y = npc.x, npc.y
+                start_location_label = npc.current_location
                 planner_meta: dict[str, Any]
                 dx = 0
                 dy = 0
@@ -3222,6 +4069,12 @@ class SimulationRunner:
                     and not pause_for_conversation
                 )
                 action_force_finish = False
+                selected_branch = "routine"
+                branch_scores: dict[str, float] = {}
+                schedule_item_current = npc.memory.scratch.current_schedule_item(
+                    step=runtime.step,
+                    step_minutes=max(1, int(runtime.step_minutes)),
+                )
 
                 normalized_scope = self._normalize_scope(planning_scope)
                 if pause_for_conversation and conversation_session is not None:
@@ -3291,22 +4144,130 @@ class SimulationRunner:
                     if target is not None:
                         planner_meta["wait_target_name"] = target.name
                 elif autopilot_enabled:
-                    if normalized_scope == "long_term_plan":
-                        rel_goal = self._goal_from_relationship(town=runtime, npc=npc)
-                        if rel_goal is not None:
-                            goal_x, goal_y, goal_reason = rel_goal
+                    branch_reason: str = normalized_scope
+                    (
+                        selected_branch,
+                        branch_reason,
+                        branch_affordance,
+                        branch_scores,
+                    ) = self._prioritize_branches(
+                        town=runtime,
+                        npc=npc,
+                        step=runtime.step,
+                        nearby_agents=perception.get("nearby_agents", []),
+                        schedule_item=schedule_item_current,
+                        cognition_planner=cognition_planner,
+                    )
+                    goal_reason = branch_reason
+                    goal_affordance = branch_affordance
+                    prefiltered: dict[str, Any] | None = None
 
-                    if goal_x is None or goal_y is None:
-                        location_goal = self._choose_location_goal(
+                    # Fast deterministic path for routine physiological actions.
+                    if selected_branch == "routine":
+                        prefiltered = self._needs_based_prefilter(
                             town=runtime,
                             npc=npc,
                             scope=normalized_scope,
+                            nearby_agents=perception.get("nearby_agents", []),
                         )
+                        if prefiltered is not None:
+                            goal_x = int(prefiltered.get("target_x") or from_x)
+                            goal_y = int(prefiltered.get("target_y") or from_y)
+                            goal_reason = str(prefiltered.get("description") or branch_reason)
+                            goal_affordance = prefiltered.get("affordance")
+
+                    if selected_branch == "social" and perception.get("nearby_agents"):
+                        nearest = sorted(
+                            perception.get("nearby_agents", []),
+                            key=lambda row: int(row.get("distance") or 9999),
+                        )
+                        target_id = str((nearest[0] or {}).get("agent_id") or "").strip() if nearest else ""
+                        partner = runtime.npcs.get(target_id)
+                        if partner is not None and partner.agent_id != npc.agent_id:
+                            goal_x = int(partner.x)
+                            goal_y = int(partner.y)
+                            goal_reason = f"talk_with_{partner.name}"
+                            goal_affordance = "social"
+
+                    if goal_x is None or goal_y is None:
+                        if normalized_scope == "long_term_plan" and selected_branch == "routine":
+                            rel_goal = self._goal_from_relationship(town=runtime, npc=npc)
+                            if rel_goal is not None:
+                                goal_x, goal_y, goal_reason = rel_goal
+                                goal_affordance = "social"
+
+                    if goal_x is None or goal_y is None:
+                        if selected_branch == "routine":
+                            location_goal = self._choose_location_goal(
+                                town=runtime,
+                                npc=npc,
+                                scope=normalized_scope,
+                            )
+                        else:
+                            location_goal = self._choose_location_goal_for_affordance(
+                                town=runtime,
+                                npc=npc,
+                                affordance=goal_affordance,
+                                reason=goal_reason or selected_branch,
+                                long_term=(normalized_scope == "long_term_plan"),
+                            )
                         if location_goal is not None:
                             goal_x, goal_y, goal_reason, goal_affordance = location_goal
 
-                    if planner:
-                        # Resolve spatial location for richer LLM context
+                    if goal_x is not None and goal_y is not None and goal_reason:
+                        validated = self._validate_goal(
+                            town=runtime,
+                            npc=npc,
+                            goal_x=goal_x,
+                            goal_y=goal_y,
+                            reason=goal_reason,
+                            step=runtime.step,
+                        )
+                        if validated is None:
+                            recovered = self._recover_from_failure(
+                                town=runtime,
+                                npc=npc,
+                                step=runtime.step,
+                                failed_reason=goal_reason,
+                                current_affordance=goal_affordance,
+                            )
+                            if recovered is not None:
+                                goal_x, goal_y, goal_reason = recovered
+                                goal_affordance = self._extract_affordance_from_reason(goal_reason) or goal_affordance
+                        else:
+                            goal_x, goal_y, goal_reason = validated[0], validated[1], validated[2]
+                            if validated[3]:
+                                planner_meta_issue = ",".join(validated[3])
+                            else:
+                                planner_meta_issue = ""
+                            if planner_meta_issue:
+                                branch_reason = f"{branch_reason} (validated: {planner_meta_issue})"
+
+                    if goal_x is not None and goal_y is not None:
+                        npc.memory.scratch.push_recent_goal(x=goal_x, y=goal_y)
+
+                    if prefiltered is not None:
+                        dx = self._clamp_delta(goal_x - from_x) if goal_x is not None else 0
+                        dy = self._clamp_delta(goal_y - from_y) if goal_y is not None else 0
+                        planner_meta = {
+                            "route": "needs_prefilter",
+                            "used_tier": "deterministic",
+                            "context_trimmed": False,
+                            "reason": goal_reason,
+                            "policy_task": normalized_scope,
+                            "retrieved_count": len(retrieved),
+                            "perceived_new_events": len(perception["new_event_descriptions"]),
+                            "prefilter": True,
+                            "selected_branch": selected_branch,
+                            "branch_scores": branch_scores,
+                            "goal": {
+                                "x": goal_x,
+                                "y": goal_y,
+                                "reason": goal_reason,
+                                "affordance": goal_affordance,
+                            },
+                        }
+                    elif planner:
                         _planner_sector: str | None = None
                         _planner_arena: str | None = None
                         _planner_object: str | None = None
@@ -3321,6 +4282,8 @@ class SimulationRunner:
                             "agent_name": npc.name,
                             "identity": npc.memory.scratch.get_str_iss(),
                             "planning_scope": planning_scope,
+                            "selected_branch": selected_branch,
+                            "branch_scores": branch_scores,
                             "position": {"x": from_x, "y": from_y},
                             "location_sector": _planner_sector,
                             "location_arena": _planner_arena,
@@ -3360,6 +4323,8 @@ class SimulationRunner:
                                 "policy_task": decision.get("policy_task"),
                                 "retrieved_count": len(retrieved),
                                 "perceived_new_events": len(perception["new_event_descriptions"]),
+                                "selected_branch": selected_branch,
+                                "branch_scores": branch_scores,
                                 "goal": {
                                     "x": goal_x,
                                     "y": goal_y,
@@ -3377,6 +4342,8 @@ class SimulationRunner:
                                 "policy_task": "plan_move",
                                 "retrieved_count": len(retrieved),
                                 "perceived_new_events": len(perception["new_event_descriptions"]),
+                                "selected_branch": selected_branch,
+                                "branch_scores": branch_scores,
                                 "goal": {
                                     "x": goal_x,
                                     "y": goal_y,
@@ -3394,6 +4361,8 @@ class SimulationRunner:
                             "policy_task": "plan_move",
                             "retrieved_count": len(retrieved),
                             "perceived_new_events": len(perception["new_event_descriptions"]),
+                            "selected_branch": selected_branch,
+                            "branch_scores": branch_scores,
                             "goal": {
                                 "x": goal_x,
                                 "y": goal_y,
@@ -3566,11 +4535,61 @@ class SimulationRunner:
                         },
                     }
 
+                if (
+                    goal_x is not None
+                    and goal_y is not None
+                    and goal_reason
+                    and not has_external_action
+                    and not pause_for_conversation
+                    and not pause_for_wait
+                    and not social_interrupted
+                ):
+                    validated_goal = self._validate_goal(
+                        town=runtime,
+                        npc=npc,
+                        goal_x=goal_x,
+                        goal_y=goal_y,
+                        reason=goal_reason,
+                        step=runtime.step,
+                    )
+                    if validated_goal is None:
+                        recovered_goal = self._recover_from_failure(
+                            town=runtime,
+                            npc=npc,
+                            step=runtime.step,
+                            failed_reason=goal_reason,
+                            current_affordance=goal_affordance,
+                        )
+                        if recovered_goal is not None:
+                            goal_x, goal_y, goal_reason = recovered_goal
+                            goal_affordance = self._extract_affordance_from_reason(goal_reason) or goal_affordance
+                            planner_meta["validation_recovered"] = True
+                        elif has_external_action:
+                            action_force_finish = True
+                            planner_meta["route"] = "external_action_stuck"
+                            planner_meta["reason"] = "external goal failed pre-execution validation"
+                            planner_meta["stuck"] = True
+                            goal_x, goal_y = None, None
+                    else:
+                        goal_x, goal_y, goal_reason = validated_goal[0], validated_goal[1], validated_goal[2]
+                        if validated_goal[3]:
+                            planner_meta["validation_issues"] = validated_goal[3]
+                        npc.memory.scratch.push_recent_goal(x=goal_x, y=goal_y)
+                    planner_meta["goal"] = {
+                        "x": goal_x,
+                        "y": goal_y,
+                        "reason": goal_reason,
+                        "affordance": goal_affordance,
+                    }
+
                 planner_meta["autonomy_mode"] = autonomy_mode
                 planner_meta["autonomy_scope_allowed"] = bool(autonomy_scope_allowed)
                 planner_meta["autonomy_ticks_used"] = int(autonomy_ticks_used)
                 planner_meta["autonomy_max_ticks"] = int(autonomy_max_ticks)
                 planner_meta["delegated_autopilot"] = bool(delegated_autopilot_enabled)
+                planner_meta.setdefault("selected_branch", selected_branch)
+                if branch_scores:
+                    planner_meta.setdefault("branch_scores", branch_scores)
                 if delegated_autopilot_enabled:
                     planner_meta["autonomy_source"] = "delegated_contract"
 
@@ -3709,6 +4728,10 @@ class SimulationRunner:
                 npc.status = "moving" if (from_x != to_x or from_y != to_y) else "idle"
                 self._update_location_memory(town=runtime, npc=npc, step=runtime.step)
                 self._perceive_spatial_tiles(town=runtime, npc=npc, step=runtime.step)
+                if npc.current_location and npc.current_location == start_location_label:
+                    npc.memory.scratch.steps_at_current_location = int(npc.memory.scratch.steps_at_current_location) + 1
+                else:
+                    npc.memory.scratch.steps_at_current_location = 0
 
                 if external_action_description:
                     action_description = external_action_description
@@ -3749,6 +4772,11 @@ class SimulationRunner:
                     address=action_address,
                     duration=10,
                     planned_path=[(goal_x, goal_y)] if goal_x is not None and goal_y is not None else [],
+                )
+                self._apply_physiology_tick(
+                    npc=npc,
+                    moved=(from_x != to_x or from_y != to_y),
+                    action_description=action_description,
                 )
 
                 # --- Generate pronunciatio (emoji + event triple) ---
@@ -3926,6 +4954,28 @@ class SimulationRunner:
                     planner_meta["action_paused"] = bool(countdown_paused and not done)
                     planner_meta["action_stuck"] = bool(action_force_finish)
                     planner_meta["pending_social_count"] = pending_social_count
+                    if done:
+                        failed = bool(
+                            action_force_finish
+                            or planner_meta.get("route") == "external_action_stuck"
+                            or planner_meta.get("action_social_timeout")
+                        )
+                        result_label = "failed" if failed else "completed"
+                        result_reason = str(planner_meta.get("reason") or "action finished")
+                        npc.memory.add_node(
+                            kind="event",
+                            step=runtime.step,
+                            subject=npc.name,
+                            predicate="temporary_command_result",
+                            object=result_label,
+                            description=(
+                                f"{npc.name} {result_label} a temporary command"
+                                f" ({result_reason})."
+                            ),
+                            poignancy=5 if failed else 4,
+                            decrement_trigger=False,
+                            memory_tier="stm",
+                        )
 
                 if delegated_autopilot_enabled and autopilot_enabled and not has_external_action:
                     runtime.autonomy_tick_counts[agent_id] = max(0, int(autonomy_ticks_used)) + 1
@@ -3944,6 +4994,11 @@ class SimulationRunner:
                         "decision": planner_meta,
                         "location": npc.current_location,
                         "goal": {"x": npc.goal_x, "y": npc.goal_y, "reason": npc.goal_reason},
+                        "physiology": {
+                            "energy": round(float(npc.energy), 2),
+                            "satiety": round(float(npc.satiety), 2),
+                            "mood": round(float(npc.mood), 2),
+                        },
                     }
                 )
 
@@ -4129,6 +5184,29 @@ def submit_agent_action(
             members=members,
             agent_id=agent_id,
             action=action,
+        )
+    finally:
+        lock.release()
+
+
+def set_agent_objective(
+    *,
+    town_id: str,
+    active_version: dict[str, Any],
+    map_data: dict[str, Any],
+    members: list[dict[str, Any]],
+    agent_id: str,
+    objective: str,
+) -> dict[str, Any] | None:
+    lock = _acquire_town_or_raise(town_id)
+    try:
+        return _RUNNER.set_agent_objective(
+            town_id=town_id,
+            active_version=active_version,
+            map_data=map_data,
+            members=members,
+            agent_id=agent_id,
+            objective=objective,
         )
     finally:
         lock.release()

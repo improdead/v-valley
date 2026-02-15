@@ -4,6 +4,18 @@ A cozy town simulation where AI agents live, work, socialize, and grow — inspi
 
 ---
 
+## Quick Orientation
+
+If you are new, read in this order:
+
+1. `README.md` (repo root) for local run + first agent.
+2. `apps/api/README.md` for endpoint examples.
+3. This document for deep internals.
+
+If you only need architecture at a glance, read `docs/ARCHITECTURE.md`.
+
+---
+
 ## Table of Contents
 
 1. [High-Level Architecture](#1-high-level-architecture)
@@ -33,15 +45,15 @@ A cozy town simulation where AI agents live, work, socialize, and grow — inspi
            │   HTTP / JSON            │  Polls state, sends ticks
            ▼                          ▼
 ┌──────────────────────────────────────────────────────────────┐
-│                    nginx (port 4173)                          │
-│  Static files: /         API proxy: /api/ → http://api:8080  │
+│               Static Web Server (default: port 4173)          │
+│  Dev: python http.server   Optional: nginx reverse proxy      │
 └──────────────────────────────┬───────────────────────────────┘
                                │
                                ▼
 ┌──────────────────────────────────────────────────────────────┐
 │                  FastAPI Server (port 8080)                   │
 │                                                              │
-│  9 Routers:                                                  │
+│  API route groups:                                           │
 │    /api/v1/agents   - Registration, auth, town membership    │
 │    /api/v1/towns    - Town directory                         │
 │    /api/v1/sim      - Simulation ticks, state, actions       │
@@ -95,7 +107,7 @@ v-valley/
 │   ├── api/                          # FastAPI application
 │   │   ├── vvalley_api/
 │   │   │   ├── main.py               # App entry point, CORS, routers
-│   │   │   ├── routers/              # 9 API routers
+│   │   │   ├── routers/              # API routers
 │   │   │   │   ├── agents.py         # Agent registration, auth, membership
 │   │   │   │   ├── towns.py          # Town directory
 │   │   │   │   ├── sim.py            # Simulation ticks, state, actions
@@ -111,13 +123,20 @@ v-valley/
 │   │   │   │   ├── llm_control.py    # LLM policies + call logs
 │   │   │   │   ├── runtime_control.py # Runtime state + autonomy
 │   │   │   │   └── interaction_hub.py # Inbox, escalations, DMs
-│   │   │   └── services/
-│   │   │       ├── runtime_scheduler.py  # Background tick daemon
-│   │   │       └── interaction_sink.py   # Post-tick event routing
-│   │   └── tests/                    # Integration tests (65 tests)
+│   │   │   ├── services/
+│   │   │   │   ├── runtime_scheduler.py  # Background tick daemon
+│   │   │   │   └── interaction_sink.py   # Post-tick event routing
+│   │   │   └── middleware/
+│   │   │       └── rate_limit.py         # In-memory rate limiting
+│   │   └── tests/                    # Integration tests (see apps/api/tests)
 │   │       ├── test_agents_api.py    # Agent registration, persona, constraints
 │   │       ├── test_maps_api.py      # Map pipeline tests
-│   │       └── test_sim_api.py       # Simulation tests
+│   │       ├── test_sim_api.py       # Simulation tests
+│   │       ├── test_towns_api.py     # Town directory tests
+│   │       ├── test_llm_api.py       # LLM policy tests
+│   │       ├── test_legacy_api.py    # Legacy bridge tests
+│   │       ├── test_providers_config.py # Provider configuration tests
+│   │       └── test_task_runner.py   # Task runner tests
 │   └── web/                          # Frontend (static files)
 │       ├── index.html                # Admin console / landing page
 │       ├── town.html                 # Phaser 3 town viewer
@@ -133,8 +152,8 @@ v-valley/
 ├── packages/
 │   └── vvalley_core/                 # Core library (no framework deps)
 │       ├── sim/
-│       │   ├── runner.py             # Simulation engine (~3000 lines)
-│       │   ├── memory.py             # Agent memory system (~1460 lines)
+│       │   ├── runner.py             # Simulation engine
+│       │   ├── memory.py             # Agent memory system
 │       │   ├── cognition.py          # Cognition planner + heuristics
 │       │   ├── legacy_replay.py      # GA replay bridge
 │       │   └── legacy_map_import.py  # GA map converter
@@ -145,18 +164,22 @@ v-valley/
 │       │   ├── customize.py          # No-code map customization
 │       │   └── templates.py          # Template discovery
 │       ├── llm/
-│       │   ├── policy.py             # 15 task policies, tier routing
+│       │   ├── policy.py             # 24 task policies, tier routing
 │       │   ├── providers.py          # OpenAI-compatible provider adapter
 │       │   └── task_runner.py        # Policy-aware execution + fallback
 │       └── db/
-│           └── migrations/           # 8 SQL migration files
+│           └── migrations/           # SQL migration files
 │
 ├── assets/
 │   ├── templates/
 │   │   └── starter_town/             # The Ville map (converted from GA)
 │   │       ├── map.json              # Full Tiled tilemap (140x100, 32px)
 │   │       ├── map.nav.json          # Pre-baked navigation data
-│   │       └── customization.example.json
+│   │       ├── map.custom.json       # Customized map version
+│   │       ├── map.custom.nav.json   # Customized nav data
+│   │       ├── customization.example.json
+│   │       ├── CUSTOMIZATION.md      # No-code customization guide
+│   │       └── README.md             # Template details
 │   └── maps/v_valley/               # Per-town published map data
 │
 ├── tools/maps/                       # CLI tools for map workflow
@@ -165,7 +188,11 @@ v-valley/
 │   ├── bake_nav.py
 │   ├── preview_map.py
 │   ├── customize_map.py
-│   └── run_first_map_e2e.py
+│   ├── run_first_map_e2e.py
+│   ├── map_utils.py
+│   ├── README.md
+│   └── tests/
+│       └── test_map_tools.py
 │
 ├── scripts/
 │   └── convert_ville_map.py          # GA → V-Valley map converter
@@ -174,7 +201,7 @@ v-valley/
 │
 ├── docker-compose.yml                # 2-service deployment (api + web)
 ├── Dockerfile                        # Python 3.12 + uvicorn
-└── requirements.txt                  # fastapi, pydantic, uvicorn
+└── requirements.txt                  # fastapi, pydantic, uvicorn, psycopg, psycopg_pool
 ```
 
 ---
@@ -537,7 +564,7 @@ gpt-5.2   gpt-5-mini gpt-5-nano  (no LLM)
 
 If a provider call fails at any tier, execution falls to the next tier automatically. The `heuristic` tier always succeeds (deterministic code).
 
-### 6.2 Task Policies (16 Named Tasks)
+### 6.2 Task Policies (24 Named Tasks + persona_gen)
 
 | Task | Default Tier | Input/Output Tokens | Temp | Timeout |
 |---|---|---|---|---|
@@ -556,6 +583,15 @@ If a provider call fails at any tier, execution falls to the next tier automatic
 | `conversation_summary` | fast | 1400 / 240 | 0.3 | 3.2s |
 | `conversation_turn` | fast | 1800 / 120 | 0.6 | 2.5s |
 | `daily_schedule_gen` | fast | 2400 / 600 | 0.4 | 5.0s |
+| `pronunciatio` | cheap | 300 / 48 | 0.1 | 1.2s |
+| `reaction_policy` | cheap | 800 / 64 | 0.2 | 1.8s |
+| `wake_up_hour` | cheap | 300 / 24 | 0.1 | 1.2s |
+| `action_address` | cheap | 800 / 96 | 0.1 | 1.8s |
+| `object_state` | cheap | 400 / 64 | 0.1 | 1.4s |
+| `event_reaction` | cheap | 600 / 64 | 0.2 | 1.6s |
+| `relationship_summary` | fast | 1200 / 160 | 0.3 | 2.5s |
+| `first_daily_plan` | fast | 2000 / 600 | 0.5 | 4.5s |
+| `schedule_recomposition` | fast | 2000 / 600 | 0.3 | 4.5s |
 | `persona_gen` | fast | — / 800 | 0.9 | 30.0s |
 
 ### 6.3 Policy Execution Flow
@@ -583,14 +619,14 @@ PolicyTaskRunner.run(task_name, context, heuristic_fn)
 ### 6.4 Provider Adapter
 
 - Uses **OpenAI-compatible API** via `urllib.request` (no external HTTP library)
-- Supports **JSON Schema structured output** (11 schemas for different tasks)
+- Supports **JSON Schema structured output** (21 schemas for different tasks)
 - System/user prompt pairs for each cognition task
 - Env vars: `VVALLEY_LLM_API_KEY`, `VVALLEY_LLM_BASE_URL`, per-tier overrides
 - Every call logged to `llm_call_logs` table (tokens, latency, success/error)
 
 ### 6.5 Two Presets
 
-- **`fun-low-cost`**: All 15 tasks routed to cheap/fast tiers with reduced token budgets
+- **`fun-low-cost`**: All 24 tasks routed to cheap/fast tiers with reduced token budgets
 - **`situational-default`**: Mixed tiers by task importance (reflection=strong, move=cheap)
 
 ---
@@ -677,14 +713,18 @@ GET /api/v1/sim/towns/{town_id}/agents/me/context
 ### 7.3 Map API
 
 ```
-GET  /api/v1/maps/templates                      # List available templates
-POST /api/v1/maps/templates/scaffold              # Create town from template
-POST /api/v1/maps/validate-file                   # Validate a map file
-POST /api/v1/maps/bake-nav-file                   # Bake navigation data
-POST /api/v1/maps/publish-version                 # Publish a versioned snapshot
-POST /api/v1/maps/activate-version                # Set a version as active
-GET  /api/v1/maps/versions/{town_id}              # List all versions
-GET  /api/v1/maps/versions/{town_id}/active       # Get active version
+POST /api/v1/maps/validate                        # Validate map JSON body
+POST /api/v1/maps/validate-file                    # Validate a map file
+POST /api/v1/maps/bake                             # Pre-compute navigation data from JSON body
+POST /api/v1/maps/bake-file                        # Bake navigation from file path
+POST /api/v1/maps/customize-file                   # Apply customization patches
+GET  /api/v1/maps/templates                        # List available templates
+POST /api/v1/maps/templates/scaffold               # Create town from template
+POST /api/v1/maps/publish-version                  # Publish a versioned snapshot
+GET  /api/v1/maps/versions/{town_id}               # List all versions
+GET  /api/v1/maps/versions/{town_id}/active        # Get active version
+GET  /api/v1/maps/versions/{town_id}/{ver}         # Get specific version
+POST /api/v1/maps/versions/{town_id}/{ver}/activate # Activate a version
 ```
 
 ### 7.4 Autonomy System
@@ -794,22 +834,24 @@ services:
 
 | Variable | Default | Description |
 |---|---|---|
-| `VVALLEY_DB_PATH` | `.vvalley.db` | SQLite database path |
+| `VVALLEY_DB_PATH` | `data/vvalley.db` | SQLite database path |
 | `VVALLEY_CORS_ORIGINS` | `*` | Allowed CORS origins |
 | `VVALLEY_AUTOSTART_TOWN_SCHEDULER` | `false` | Auto-start background ticking |
 | `VVALLEY_SIM_STATE_DIR` | `{db_path}.sim_state` | Simulation state directory |
 | `VVALLEY_LLM_API_KEY` | (none) | OpenAI-compatible API key |
-| `VVALLEY_LLM_BASE_URL` | (none) | LLM provider base URL |
+| `VVALLEY_LLM_BASE_URL` | `https://api.openai.com/v1` | LLM provider base URL |
 | `VVALLEY_LLM_{TIER}_API_KEY` | (none) | Per-tier API key override |
 | `VVALLEY_LLM_{TIER}_BASE_URL` | (none) | Per-tier base URL override |
 | `VVALLEY_LLM_{TIER}_MODEL` | (none) | Per-tier model override |
 
 ### 9.3 Dependencies
 
-Only 3 Python packages:
+5 Python packages:
 - `fastapi>=0.115.0,<1.0`
 - `pydantic>=2.0,<3.0`
 - `uvicorn[standard]>=0.30.0,<1.0`
+- `psycopg[binary]>=3.1,<4.0`
+- `psycopg_pool>=3.1,<4.0`
 
 No external HTTP library, no ORM, no embedding model. The system is intentionally minimal.
 
@@ -912,7 +954,7 @@ Step N+K+1: Conversation ends
 | Character sprites | 25 named characters, pre-assigned | 25 GA sprites, server-assigned (unique per town) |
 | Agent identity | Fixed (pre-configured name, traits, backstory) | Dynamic (AI-generated or user-provided) |
 | LLM dependency | Required (ChatGPT) | Optional (heuristic fallback) |
-| LLM control | Hardcoded | 16 named policies with tier routing |
+| LLM control | Hardcoded | 24 named policies with tier routing |
 | Memory retrieval | External embeddings | 24-dim hash-based vectors |
 | Memory bootstrap | Pre-seeded with identity + relationships | Persona-aware (identity, backstory, daily_req) or generic |
 | Agent control | Fully autonomous | Manual / delegated / autonomous |
