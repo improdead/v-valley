@@ -304,6 +304,30 @@ class SimApiTests(unittest.TestCase):
                 break
         self.assertTrue(found_social)
 
+    def test_set_objective_endpoint_persists_to_context(self) -> None:
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+        agent = self._register_and_join(town_id, "ObjectivePilot", "owner-obj")
+        api_key = agent["api_key"]
+
+        set_resp = self.client.post(
+            f"/api/v1/sim/towns/{town_id}/agents/me/objective",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"objective": "Focus on building stronger social ties this week."},
+        )
+        self.assertEqual(set_resp.status_code, 200)
+        accepted = set_resp.json()["accepted"]
+        self.assertEqual(accepted["agent_id"], agent["id"])
+        self.assertIn("social ties", accepted["objective"])
+
+        context_resp = self.client.get(
+            f"/api/v1/sim/towns/{town_id}/agents/me/context",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        self.assertEqual(context_resp.status_code, 200)
+        context_payload = context_resp.json()["context"]["context"]
+        self.assertIn("social ties", str(context_payload.get("long_term_objective") or ""))
+
     def test_social_action_without_goal_auto_tracks_target(self) -> None:
         town_id = f"town-{uuid.uuid4().hex[:8]}"
         self._publish_town(town_id)

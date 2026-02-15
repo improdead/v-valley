@@ -17,6 +17,7 @@ from packages.vvalley_core.sim.runner import (
     get_agent_context_snapshot,
     get_agent_memory_snapshot,
     get_simulation_state,
+    set_agent_objective,
     submit_agent_action,
     tick_simulation,
 )
@@ -106,6 +107,10 @@ class SubmitAgentActionRequest(BaseModel):
     social_interrupt_cooldown_steps: Optional[int] = Field(default=None, ge=1, le=240)
     socials: list[AgentActionSocialRequest] = Field(default_factory=list)
     memory_nodes: list[AgentActionMemoryNodeRequest] = Field(default_factory=list)
+
+
+class SetAgentObjectiveRequest(BaseModel):
+    objective: str = Field(min_length=1, max_length=500)
 
 
 def _resolve_workspace_path(path_str: str) -> Path:
@@ -302,6 +307,36 @@ def town_agent_action(
         members=members,
         agent_id=str(agent["id"]),
         action=action_payload,
+    )
+    if accepted is None:
+        raise HTTPException(status_code=404, detail=f"Agent not found in town runtime: {agent['id']}")
+    return {
+        "ok": True,
+        "town_id": town_id,
+        "active_map": {
+            "id": active["id"],
+            "version": int(active["version"]),
+            "map_name": active.get("map_name"),
+        },
+        "accepted": accepted,
+    }
+
+
+@router.post("/towns/{town_id}/agents/me/objective")
+def town_agent_objective(
+    town_id: str,
+    req: SetAgentObjectiveRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    agent = _require_agent_membership(town_id=town_id, authorization=authorization)
+    active, map_data, members = _load_runtime_inputs(town_id)
+    accepted = set_agent_objective(
+        town_id=town_id,
+        active_version=active,
+        map_data=map_data,
+        members=members,
+        agent_id=str(agent["id"]),
+        objective=str(req.objective),
     )
     if accepted is None:
         raise HTTPException(status_code=404, detail=f"Agent not found in town runtime: {agent['id']}")

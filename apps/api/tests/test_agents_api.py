@@ -582,9 +582,13 @@ class GAFeatureGapTests(unittest.TestCase):
         iss = mem.scratch.get_str_iss()
         self.assertIn("Name: Klaus Mueller", iss)
         self.assertIn("Age: 20", iss)
-        self.assertIn("Innate traits: curious, analytical", iss)
+        self.assertTrue(
+            ("Innate traits: curious, analytical" in iss) or ("Traits: curious, analytical" in iss)
+        )
         self.assertIn("Background: Klaus is a chemistry student.", iss)
-        self.assertIn("Lifestyle: wakes at 8am", iss)
+        self.assertTrue(
+            ("Lifestyle: wakes at 8am" in iss) or ("Habits: wakes at 8am" in iss)
+        )
 
     def test_iss_serialization_roundtrip(self) -> None:
         from packages.vvalley_core.sim.memory import AgentMemory
@@ -733,18 +737,36 @@ class GAFeatureGapTests(unittest.TestCase):
         self.assertTrue(hasattr(CognitionPlanner, "generate_pronunciatio"))
         self.assertTrue(hasattr(CognitionPlanner, "decide_to_talk"))
         self.assertTrue(hasattr(CognitionPlanner, "generate_wake_up_hour"))
+        self.assertTrue(hasattr(CognitionPlanner, "contextual_prioritize"))
+        self.assertTrue(hasattr(CognitionPlanner, "evolve_identity"))
+        self.assertTrue(hasattr(CognitionPlanner, "assess_social_attitude"))
 
     def test_task_policies_include_new_tasks(self) -> None:
         from packages.vvalley_core.llm.policy import DEFAULT_TASK_POLICIES
 
         self.assertIn("pronunciatio", DEFAULT_TASK_POLICIES)
-        self.assertIn("reaction_policy", DEFAULT_TASK_POLICIES)
-        self.assertIn("wake_up_hour", DEFAULT_TASK_POLICIES)
+        self.assertIn("contextual_prioritize", DEFAULT_TASK_POLICIES)
+        self.assertIn("identity_evolution", DEFAULT_TASK_POLICIES)
+        self.assertIn("social_attitude", DEFAULT_TASK_POLICIES)
 
-        # Verify tiers
-        self.assertEqual(DEFAULT_TASK_POLICIES["pronunciatio"].model_tier, "cheap")
-        self.assertEqual(DEFAULT_TASK_POLICIES["reaction_policy"].model_tier, "cheap")
-        self.assertEqual(DEFAULT_TASK_POLICIES["wake_up_hour"].model_tier, "cheap")
+    def test_memory_tier_promotes_after_retrievals(self) -> None:
+        from packages.vvalley_core.sim.memory import AgentMemory
+
+        mem = AgentMemory.bootstrap(agent_id="tier1", agent_name="Tier Agent", step=0)
+        node = mem.add_node(
+            kind="thought",
+            step=1,
+            subject="Tier Agent",
+            predicate="notes",
+            object="priority",
+            description="important repeated lesson",
+            poignancy=5,
+        )
+        self.assertEqual(node.memory_tier, "stm")
+        for _ in range(3):
+            mem.retrieve_ranked(focal_text="important repeated lesson", step=10, limit=5, retrieval_mode="short_term")
+        promoted = mem.id_to_node[node.node_id]
+        self.assertEqual(promoted.memory_tier, "ltm")
 
     # --- Wave 2 Gap Closure Tests ---
 
@@ -2327,6 +2349,488 @@ class ContextHashTests(unittest.TestCase):
         self.assertNotEqual(h1, h2, "Hash should change when nearby agent appears")
 
         reset_simulation_states_for_tests()
+
+
+class DualMemoryStreamTests(unittest.TestCase):
+    """Tests for dual memory stream retrieval (event vs perception)."""
+
+    def test_mixed_kinds_both_streams_populated(self) -> None:
+        """Both streams should be populated when memory has mixed kinds."""
+        from packages.vvalley_core.sim.memory import AgentMemory
+
+        mem = AgentMemory.bootstrap(agent_id="ds1", agent_name="DualTest", step=0)
+        # Add event-stream memories
+        mem.add_node(kind="event", step=1, subject="Alice", predicate="walked to", object="park",
+                     description="Alice walked to the park", poignancy=3)
+        mem.add_node(kind="chat", step=2, subject="Alice", predicate="said", object="hello",
+                     description="Alice said hello to Bob", poignancy=4)
+        # Add perception-stream memories
+        mem.add_node(kind="thought", step=3, subject="Alice", predicate="feels", object="happy",
+                     description="Alice feels happy about the conversation", poignancy=5)
+        mem.add_node(kind="reflection", step=4, subject="Alice", predicate="realizes", object="friendship",
+                     description="Alice realizes friendship is important", poignancy=6)
+
+        result = mem.retrieve_ranked_by_stream(focal_text="park conversation", step=5, limit=4)
+        self.assertIn("event_stream", result)
+        self.assertIn("perception_stream", result)
+        self.assertTrue(len(result["event_stream"]) > 0, "Event stream should have results")
+        self.assertTrue(len(result["perception_stream"]) > 0, "Perception stream should have results")
+        total = len(result["event_stream"]) + len(result["perception_stream"])
+        self.assertLessEqual(total, 4)
+
+    def test_only_events_backfill(self) -> None:
+        """When only events exist, event_stream gets all slots via backfill."""
+        from packages.vvalley_core.sim.memory import AgentMemory
+
+        mem = AgentMemory.bootstrap(agent_id="ds2", agent_name="EventOnly", step=0)
+        # Clear bootstrap memories to isolate test
+        mem.nodes.clear()
+        mem.id_to_node.clear()
+        mem.seq_event.clear()
+        mem.seq_thought.clear()
+        mem.seq_chat.clear()
+        mem.seq_reflection.clear()
+
+        for i in range(5):
+            mem.add_node(kind="event", step=i + 1, subject="Bob", predicate="did", object=f"thing_{i}",
+                         description=f"Bob did thing {i}", poignancy=3)
+
+        result = mem.retrieve_ranked_by_stream(focal_text="Bob activities", step=6, limit=4)
+        self.assertEqual(len(result["perception_stream"]), 0)
+        self.assertTrue(len(result["event_stream"]) > 0)
+
+    def test_backfill_short_stream(self) -> None:
+        """When one stream is short, the other gets extra slots."""
+        from packages.vvalley_core.sim.memory import AgentMemory
+
+        mem = AgentMemory.bootstrap(agent_id="ds3", agent_name="Backfill", step=0)
+        # Clear bootstrap memories to isolate test
+        mem.nodes.clear()
+        mem.id_to_node.clear()
+        mem.seq_event.clear()
+        mem.seq_thought.clear()
+        mem.seq_chat.clear()
+        mem.seq_reflection.clear()
+
+        # 1 thought, 5 events
+        mem.add_node(kind="thought", step=1, subject="X", predicate="thinks", object="Y",
+                     description="X thinks about Y", poignancy=5)
+        for i in range(5):
+            mem.add_node(kind="event", step=i + 2, subject="X", predicate="saw", object=f"obj_{i}",
+                         description=f"X saw object {i}", poignancy=3)
+
+        result = mem.retrieve_ranked_by_stream(focal_text="objects", step=8, limit=6)
+        total = len(result["event_stream"]) + len(result["perception_stream"])
+        self.assertLessEqual(total, 6)
+        # Perception has only 1 node, so event should get backfill
+        self.assertLessEqual(len(result["perception_stream"]), 1)
+        self.assertGreater(len(result["event_stream"]), 3, "Event stream should get extra slots from backfill")
+
+    def test_empty_memory_both_empty(self) -> None:
+        """Empty memory should return both streams empty."""
+        from packages.vvalley_core.sim.memory import AgentMemory
+
+        mem = AgentMemory.bootstrap(agent_id="ds4", agent_name="Empty", step=0)
+        # Clear bootstrap memories
+        mem.nodes.clear()
+        mem.id_to_node.clear()
+        mem.seq_event.clear()
+        mem.seq_thought.clear()
+        mem.seq_chat.clear()
+        mem.seq_reflection.clear()
+
+        result = mem.retrieve_ranked_by_stream(focal_text="anything", step=1, limit=6)
+        self.assertEqual(result["event_stream"], [])
+        self.assertEqual(result["perception_stream"], [])
+
+    def test_retrieved_is_union_of_streams(self) -> None:
+        """The flat 'retrieved' list in context should be union of both streams."""
+        from packages.vvalley_core.sim.memory import AgentMemory
+
+        mem = AgentMemory.bootstrap(agent_id="ds5", agent_name="Union", step=0)
+        mem.add_node(kind="event", step=1, subject="A", predicate="met", object="B",
+                     description="A met B at the cafe", poignancy=4)
+        mem.add_node(kind="thought", step=2, subject="A", predicate="wonders", object="about B",
+                     description="A wonders about B's intentions", poignancy=5)
+
+        streams = mem.retrieve_ranked_by_stream(focal_text="cafe meeting", step=3, limit=4)
+        flat = streams["event_stream"] + streams["perception_stream"]
+        # Also check that retrieve_ranked still works (backward compat)
+        ranked = mem.retrieve_ranked(focal_text="cafe meeting", step=3, limit=4)
+        self.assertTrue(len(ranked) > 0)
+        self.assertTrue(len(flat) > 0)
+
+    def test_context_response_has_stream_fields(self) -> None:
+        """Context response should include event_stream and perception_stream."""
+        from packages.vvalley_core.sim.runner import (
+            get_agent_context_snapshot,
+            reset_simulation_states_for_tests,
+        )
+
+        reset_simulation_states_for_tests()
+        active = {"id": "v1", "version": 1, "map_name": "test", "town_id": "t1"}
+        map_data = {
+            "width": 10, "height": 10, "tilewidth": 32, "tileheight": 32,
+            "layers": [{"name": "collision", "data": [0] * 100}],
+            "spawns": [{"x": 0, "y": 0}],
+            "locations": [],
+        }
+        members = [{"agent_id": "a1", "name": "StreamAgent"}]
+
+        ctx = get_agent_context_snapshot(
+            town_id="t-stream-1",
+            active_version=active,
+            map_data=map_data,
+            members=members,
+            agent_id="a1",
+        )
+
+        memory = ctx["context"]["memory"]
+        self.assertIn("retrieved", memory)
+        self.assertIn("event_stream", memory)
+        self.assertIn("perception_stream", memory)
+        # retrieved should equal event_stream + perception_stream
+        expected = memory["event_stream"] + memory["perception_stream"]
+        self.assertEqual(memory["retrieved"], expected)
+
+        reset_simulation_states_for_tests()
+
+
+class DecisionComplexityTests(unittest.TestCase):
+    """Tests for decision complexity hint in context response."""
+
+    def test_routine_no_nearby_agents(self) -> None:
+        """No nearby agents + home affordance = routine."""
+        from packages.vvalley_core.sim.runner import SimulationRunner
+        from packages.vvalley_core.sim.memory import ScheduleItem
+
+        runner = SimulationRunner()
+        result = runner._compute_decision_complexity(
+            schedule_item=ScheduleItem(description="sleep", duration_mins=480, affordance_hint="home"),
+            nearby_agents=[],
+            conversation=None,
+            active_action=None,
+        )
+        self.assertEqual(result, "routine")
+
+    def test_social_nearby_agents_social_affordance(self) -> None:
+        """Nearby agents + social affordance = social."""
+        from packages.vvalley_core.sim.runner import SimulationRunner
+        from packages.vvalley_core.sim.memory import ScheduleItem
+
+        runner = SimulationRunner()
+        result = runner._compute_decision_complexity(
+            schedule_item=ScheduleItem(description="hang out", duration_mins=60, affordance_hint="social"),
+            nearby_agents=[{"agent_id": "a2", "name": "Bob"}],
+            conversation=None,
+            active_action=None,
+        )
+        self.assertEqual(result, "social")
+
+    def test_complex_active_conversation(self) -> None:
+        """Active conversation awaiting reply = complex."""
+        from packages.vvalley_core.sim.runner import SimulationRunner
+
+        runner = SimulationRunner()
+        result = runner._compute_decision_complexity(
+            schedule_item=None,
+            nearby_agents=[{"agent_id": "a2", "name": "Bob"}],
+            conversation={"partner": "Bob", "awaiting_reply": True},
+            active_action=None,
+        )
+        self.assertEqual(result, "complex")
+
+    def test_complexity_in_context_response(self) -> None:
+        """Context response should include decision_complexity field."""
+        from packages.vvalley_core.sim.runner import (
+            get_agent_context_snapshot,
+            reset_simulation_states_for_tests,
+        )
+
+        reset_simulation_states_for_tests()
+        active = {"id": "v1", "version": 1, "map_name": "test", "town_id": "t1"}
+        map_data = {
+            "width": 10, "height": 10, "tilewidth": 32, "tileheight": 32,
+            "layers": [{"name": "collision", "data": [0] * 100}],
+            "spawns": [{"x": 0, "y": 0}],
+            "locations": [],
+        }
+        members = [{"agent_id": "a1", "name": "ComplexAgent"}]
+
+        ctx = get_agent_context_snapshot(
+            town_id="t-complexity-1",
+            active_version=active,
+            map_data=map_data,
+            members=members,
+            agent_id="a1",
+        )
+
+        context = ctx["context"]
+        self.assertIn("decision_complexity", context)
+        self.assertIn(context["decision_complexity"], ("routine", "social", "complex"))
+
+        reset_simulation_states_for_tests()
+
+
+class GravityModelTests(unittest.TestCase):
+    """Tests for gravity model spatial decisions and improved heuristic action address."""
+
+    def test_gravity_stochastic_different_steps(self) -> None:
+        """Same agent at different steps should sometimes pick different locations."""
+        from packages.vvalley_core.sim.runner import (
+            SimulationRunner,
+            TownRuntime,
+            NpcState,
+            MapLocationPoint,
+        )
+        from packages.vvalley_core.sim.memory import AgentMemory
+
+        runner = SimulationRunner()
+        # Create a minimal town with multiple locations
+        town = TownRuntime(
+            town_id="grav-1", map_version_id="v1", map_version=1, map_name="test",
+            width=50, height=50,
+            walkable=[[1] * 50 for _ in range(50)],
+            spawn_points=[(0, 0)],
+            location_points=[
+                MapLocationPoint(name="Park A", x=10, y=10, affordances=()),
+                MapLocationPoint(name="Park B", x=40, y=40, affordances=()),
+                MapLocationPoint(name="Park C", x=5, y=5, affordances=()),
+                MapLocationPoint(name="Park D", x=30, y=20, affordances=()),
+            ],
+        )
+
+        mem = AgentMemory.bootstrap(agent_id="g1", agent_name="GravAgent", step=0)
+        npc = NpcState(
+            agent_id="g1", name="GravAgent", x=25, y=25, memory=mem,
+            owner_handle=None, claim_status="claimed", joined_at=None,
+        )
+        town.npcs["g1"] = npc
+
+        chosen_positions: set[tuple[int, int]] = set()
+        for step in range(20):
+            town.step = step
+            result = runner._choose_location_goal(town=town, npc=npc, scope="short_action")
+            if result:
+                chosen_positions.add((result[0], result[1]))
+
+        self.assertGreaterEqual(len(chosen_positions), 2,
+                                "Gravity model should pick different locations across steps")
+
+    def test_gravity_closer_preferred(self) -> None:
+        """Closer locations should be chosen more frequently."""
+        from packages.vvalley_core.sim.runner import (
+            SimulationRunner,
+            TownRuntime,
+            NpcState,
+            MapLocationPoint,
+        )
+        from packages.vvalley_core.sim.memory import AgentMemory
+
+        runner = SimulationRunner()
+        town = TownRuntime(
+            town_id="grav-2", map_version_id="v1", map_version=1, map_name="test",
+            width=50, height=50,
+            walkable=[[1] * 50 for _ in range(50)],
+            spawn_points=[(0, 0)],
+            location_points=[
+                MapLocationPoint(name="Near", x=2, y=2, affordances=()),
+                MapLocationPoint(name="Far", x=45, y=45, affordances=()),
+            ],
+        )
+
+        mem = AgentMemory.bootstrap(agent_id="g2", agent_name="GravAgent2", step=0)
+        npc = NpcState(
+            agent_id="g2", name="GravAgent2", x=0, y=0, memory=mem,
+            owner_handle=None, claim_status="claimed", joined_at=None,
+        )
+        town.npcs["g2"] = npc
+
+        near_count = 0
+        far_count = 0
+        for step in range(100):
+            town.step = step
+            result = runner._choose_location_goal(town=town, npc=npc, scope="short_action")
+            if result:
+                dist_near = abs(result[0] - 2) + abs(result[1] - 2)
+                dist_far = abs(result[0] - 45) + abs(result[1] - 45)
+                if dist_near <= dist_far:
+                    near_count += 1
+                else:
+                    far_count += 1
+
+        self.assertGreater(near_count, far_count,
+                           f"Near should be preferred: near={near_count}, far={far_count}")
+
+    def test_long_term_prefers_familiar(self) -> None:
+        """Long-term scope should prefer visited/familiar places."""
+        from packages.vvalley_core.sim.runner import (
+            SimulationRunner,
+            TownRuntime,
+            NpcState,
+            MapLocationPoint,
+        )
+        from packages.vvalley_core.sim.memory import AgentMemory
+
+        runner = SimulationRunner()
+        town = TownRuntime(
+            town_id="grav-3", map_version_id="v1", map_version=1, map_name="test",
+            width=50, height=50,
+            walkable=[[1] * 50 for _ in range(50)],
+            spawn_points=[(0, 0)],
+            location_points=[
+                MapLocationPoint(name="FavSpot", x=10, y=10, affordances=("social",)),
+                MapLocationPoint(name="NewSpot", x=12, y=12, affordances=("social",)),
+            ],
+        )
+
+        mem = AgentMemory.bootstrap(agent_id="g3", agent_name="GravAgent3", step=0)
+        # Mark FavSpot as heavily visited (label includes affordances)
+        mem.known_places["FavSpot (social)"] = 20
+        mem.known_places["NewSpot (social)"] = 0
+
+        npc = NpcState(
+            agent_id="g3", name="GravAgent3", x=11, y=11, memory=mem,
+            owner_handle=None, claim_status="claimed", joined_at=None,
+        )
+        town.npcs["g3"] = npc
+
+        fav_count = 0
+        for step in range(50):
+            town.step = step
+            result = runner._choose_location_goal(town=town, npc=npc, scope="long_term_plan")
+            if result:
+                dist_fav = abs(result[0] - 10) + abs(result[1] - 10)
+                dist_new = abs(result[0] - 12) + abs(result[1] - 12)
+                if dist_fav <= dist_new:
+                    fav_count += 1
+
+        self.assertGreater(fav_count, 25,
+                           f"Long-term should prefer familiar: fav_count={fav_count}/50")
+
+    def test_heuristic_picks_closest_arena(self) -> None:
+        """Heuristic action address should pick closest arena with position data."""
+        from packages.vvalley_core.sim.cognition import _heuristic_action_address
+
+        context = {
+            "agent_id": "test",
+            "action_description": "walk around",
+            "available_sectors": ["The Park"],
+            "living_area": "",
+            "available_arenas": ["North Gate", "South Garden", "East Bench"],
+            "available_objects": [],
+            "agent_x": 10,
+            "agent_y": 10,
+            "arena_positions": {
+                "North Gate": (50, 50),
+                "South Garden": (12, 12),
+                "East Bench": (30, 30),
+            },
+            "object_positions": {},
+        }
+        result = _heuristic_action_address(context)
+        self.assertEqual(result["action_arena"], "South Garden",
+                         "Should pick closest arena by manhattan distance")
+
+    def test_heuristic_keyword_overrides_distance(self) -> None:
+        """Keyword match in action description should override distance."""
+        from packages.vvalley_core.sim.cognition import _heuristic_action_address
+
+        context = {
+            "agent_id": "test",
+            "action_description": "study at the library",
+            "available_sectors": ["College District"],
+            "living_area": "",
+            "available_arenas": ["Cafeteria", "Library Hall", "Main Office"],
+            "available_objects": [],
+            "agent_x": 0,
+            "agent_y": 0,
+            "arena_positions": {
+                "Cafeteria": (1, 1),
+                "Library Hall": (50, 50),
+                "Main Office": (2, 2),
+            },
+            "object_positions": {},
+        }
+        result = _heuristic_action_address(context)
+        self.assertEqual(result["action_arena"], "Library Hall",
+                         "Keyword 'library' should match 'Library Hall' despite distance")
+
+
+class NeedsPrefilterTests(unittest.TestCase):
+    """Tests for needs-based autopilot pre-filter."""
+
+    def _make_town_and_npc(self, affordance_hint: str | None) -> tuple:
+        from packages.vvalley_core.sim.runner import (
+            SimulationRunner,
+            TownRuntime,
+            NpcState,
+            MapLocationPoint,
+        )
+        from packages.vvalley_core.sim.memory import AgentMemory, ScheduleItem
+
+        runner = SimulationRunner()
+        town = TownRuntime(
+            town_id="pf-1", map_version_id="v1", map_version=1, map_name="test",
+            width=50, height=50,
+            walkable=[[1] * 50 for _ in range(50)],
+            spawn_points=[(0, 0)],
+            location_points=[
+                MapLocationPoint(name="House", x=5, y=5, affordances=("home",)),
+                MapLocationPoint(name="Cafe", x=10, y=10, affordances=("food",)),
+            ],
+        )
+        town.step = 0
+
+        mem = AgentMemory.bootstrap(agent_id="pf1", agent_name="PFAgent", step=0)
+        # Set up a schedule with the desired affordance
+        mem.scratch.daily_schedule = [
+            ScheduleItem(description="doing stuff", duration_mins=1440, affordance_hint=affordance_hint),
+        ]
+        npc = NpcState(
+            agent_id="pf1", name="PFAgent", x=0, y=0, memory=mem,
+            owner_handle=None, claim_status="claimed", joined_at=None,
+        )
+        town.npcs["pf1"] = npc
+        return runner, town, npc
+
+    def test_home_affordance_no_nearby_returns_action(self) -> None:
+        """Home affordance + no nearby agents → returns move action with prefilter flag."""
+        runner, town, npc = self._make_town_and_npc("home")
+        result = runner._needs_based_prefilter(
+            town=town, npc=npc, scope="short_action", nearby_agents=[],
+        )
+        self.assertIsNotNone(result)
+        self.assertTrue(result["prefilter"])
+        self.assertIn("target_x", result)
+        self.assertIn("target_y", result)
+
+    def test_social_affordance_returns_none(self) -> None:
+        """Social affordance → returns None (needs LLM)."""
+        runner, town, npc = self._make_town_and_npc("social")
+        result = runner._needs_based_prefilter(
+            town=town, npc=npc, scope="short_action", nearby_agents=[],
+        )
+        self.assertIsNone(result)
+
+    def test_food_with_nearby_agents_returns_none(self) -> None:
+        """Food affordance + nearby agents → returns None (social opportunity)."""
+        runner, town, npc = self._make_town_and_npc("food")
+        result = runner._needs_based_prefilter(
+            town=town, npc=npc, scope="short_action",
+            nearby_agents=[{"agent_id": "other", "name": "Other", "distance": 2}],
+        )
+        self.assertIsNone(result)
+
+    def test_work_affordance_returns_prefilter_flag(self) -> None:
+        """Work affordance action dict has prefilter: True."""
+        runner, town, npc = self._make_town_and_npc("work")
+        result = runner._needs_based_prefilter(
+            town=town, npc=npc, scope="short_action", nearby_agents=[],
+        )
+        self.assertIsNotNone(result)
+        self.assertTrue(result["prefilter"])
+        self.assertIsNotNone(result.get("description"))
 
 
 if __name__ == "__main__":

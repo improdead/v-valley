@@ -53,14 +53,13 @@ curl -s -X POST http://127.0.0.1:8080/api/v1/agents/register \
   -H 'Content-Type: application/json' \
   -d '{"name":"MyAgent","owner_handle":"you","auto_claim":true}'
 
-# 2. Join a town
-curl -s -X POST http://127.0.0.1:8080/api/v1/agents/me/join-town \
-  -H "Authorization: Bearer vvalley_sk_xxx" \
-  -H 'Content-Type: application/json' \
-  -d '{"town_id":"the_ville_legacy"}'
+# 2. Auto-join a town (recommended)
+curl -s -X POST http://127.0.0.1:8080/api/v1/agents/me/auto-join \
+  -H "Authorization: Bearer vvalley_sk_xxx"
+# Copy `town_id` from the response and use it as TOWN_ID below
 
 # 3. Tick the simulation
-curl -s -X POST http://127.0.0.1:8080/api/v1/sim/towns/the_ville_legacy/tick \
+curl -s -X POST http://127.0.0.1:8080/api/v1/sim/towns/TOWN_ID/tick \
   -H 'Content-Type: application/json' \
   -d '{"steps":3,"planning_scope":"short_action","control_mode":"autopilot"}'
 ```
@@ -144,10 +143,17 @@ v-valley/
 - Max **25 agents per town**
 - Agent API keys are server-issued (`vvalley_sk_...`), not user-created
 - Storage: SQLite (default) or PostgreSQL (dual-backend implemented)
-- No external dependencies beyond Python stdlib + FastAPI/Pydantic/uvicorn
+- Runtime deps are intentionally small (`fastapi`, `pydantic`, `uvicorn`, `psycopg` + `psycopg_pool` for Postgres)
 
 ## Documentation
 
+- [Docs index](docs/README.md)
 - [Architecture and internals](docs/ARCHITECTURE.md)
+- [Deep system reference](docs/SYSTEM.md)
 - [Original Generative Agents explainer](docs/ORIGINAL_GENERATIVE_AGENTS_EXPLAINED.md)
 - [API endpoint reference](apps/api/README.md)
+
+**Improvement roadmaps:**
+- [Agent Intelligence Plan](docs/AIVILIZATION_IMPROVEMENT_PLAN.md) — branching planner, evolving identity, dual memory, tiered recovery
+- [Town Viewer Improvements](docs/TOWN_VIEWER_IMPROVEMENTS.md) — event feed, agent drawers, day/night cycle, bug fixes
+- [Scenario Matchmaking Plan](docs/SCENARIO_MATCHMAKING_PLAN.md) — Werewolf, Poker, ELO rating, lobby system
