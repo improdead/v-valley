@@ -22,6 +22,7 @@ from ..services.scenario_matchmaker import (
 )
 from ..storage import scenarios as scenario_store
 from ..storage.agents import get_agent_by_api_key, get_agent_town
+from ..storage.runtime_control import get_latest_completed_step
 
 
 logger = logging.getLogger("vvalley_api.scenarios")
@@ -59,6 +60,31 @@ def _scenario_or_404(scenario_key: str) -> dict[str, Any]:
     if not scenario or not bool(scenario.get("enabled", False)):
         raise HTTPException(status_code=404, detail=f"Scenario not found: {scenario_key}")
     return scenario
+
+
+def _current_step_for_town(town_id: str) -> int:
+    tid = str(town_id or "").strip()
+    if not tid:
+        return 0
+    try:
+        return max(0, int(get_latest_completed_step(town_id=tid)))
+    except Exception:
+        return 0
+
+
+def _current_step_for_match(match_id: str) -> int:
+    match = scenario_store.get_match(match_id=str(match_id))
+    if not match:
+        return 0
+    step = _current_step_for_town(str(match.get("town_id") or ""))
+    for key in ("end_step", "start_step", "created_step"):
+        try:
+            candidate = int(match.get(key) or 0)
+        except Exception:
+            candidate = 0
+        if candidate > step:
+            step = candidate
+    return max(0, int(step))
 
 
 @router.get("")
@@ -155,11 +181,12 @@ def match_forfeit(
     authorization: Optional[str] = Header(default=None),
 ) -> dict[str, Any]:
     agent = _require_agent(authorization)
+    current_step = _current_step_for_match(match_id)
     try:
         match = forfeit_match(
             match_id=match_id,
             agent_id=str(agent["id"]),
-            current_step=0,
+            current_step=current_step,
             reason="Player forfeited",
         )
     except ValueError as exc:
@@ -182,11 +209,12 @@ def match_cancel(
     authorization: Optional[str] = Header(default=None),
 ) -> dict[str, Any]:
     agent = _require_agent(authorization)
+    current_step = _current_step_for_match(match_id)
     try:
         match = cancel_match(
             match_id=match_id,
             requested_by_agent_id=str(agent["id"]),
-            current_step=0,
+            current_step=current_step,
             reason="Cancelled by participant",
         )
     except ValueError as exc:
@@ -292,16 +320,22 @@ def queue_join(
     town_id = str(membership.get("town_id") or "").strip()
     if not town_id:
         raise HTTPException(status_code=403, detail="Agent must join a valid town before queueing")
+    current_step = _current_step_for_town(town_id)
 
     try:
-        result = join_queue(scenario_key=scenario_key, town_id=town_id, agent_id=str(agent["id"]))
+        result = join_queue(
+            scenario_key=scenario_key,
+            town_id=town_id,
+            agent_id=str(agent["id"]),
+            current_step=current_step,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     # Opportunistic formation pass.
-    formed = form_matches(town_id=town_id, scenario_key=scenario_key, current_step=0)
+    formed = form_matches(town_id=town_id, scenario_key=scenario_key, current_step=current_step)
     if formed:
         result["formed_matches"] = formed
 

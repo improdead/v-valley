@@ -285,6 +285,135 @@ class ScenariosApiTests(unittest.TestCase):
 
         self.assertEqual(before_wallets, after_wallets)
 
+    def test_forfeit_releases_player_for_new_queue_and_records_nonzero_step(self) -> None:
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+        roster = [
+            self._register_and_join(town_id, f"Requeue-{i}", f"requeue-owner-{i}")
+            for i in range(4)
+        ]
+
+        for agent in roster:
+            resp = self.client.post(
+                "/api/v1/scenarios/anaconda_standard/queue/join",
+                headers={"Authorization": f"Bearer {agent['api_key']}"},
+            )
+            self.assertEqual(resp.status_code, 200)
+
+        for _ in range(3):
+            tick = self.client.post(f"/api/v1/sim/towns/{town_id}/tick", json={"steps": 1})
+            self.assertEqual(tick.status_code, 200)
+
+        me_match = self.client.get(
+            "/api/v1/scenarios/me/match",
+            headers={"Authorization": f"Bearer {roster[0]['api_key']}"},
+        )
+        self.assertEqual(me_match.status_code, 200)
+        match_id = str(me_match.json().get("match", {}).get("match_id") or "")
+        self.assertTrue(match_id)
+
+        forfeited = self.client.post(
+            f"/api/v1/scenarios/matches/{match_id}/forfeit",
+            headers={"Authorization": f"Bearer {roster[0]['api_key']}"},
+        )
+        self.assertEqual(forfeited.status_code, 200)
+
+        me_after = self.client.get(
+            "/api/v1/scenarios/me/match",
+            headers={"Authorization": f"Bearer {roster[0]['api_key']}"},
+        )
+        self.assertEqual(me_after.status_code, 200)
+        self.assertFalse(bool(me_after.json().get("active")))
+
+        requeue = self.client.post(
+            "/api/v1/scenarios/werewolf_6p/queue/join",
+            headers={"Authorization": f"Bearer {roster[0]['api_key']}"},
+        )
+        self.assertEqual(requeue.status_code, 200)
+
+        events = self.client.get(f"/api/v1/scenarios/matches/{match_id}/events")
+        self.assertEqual(events.status_code, 200)
+        forfeit_events = [
+            item
+            for item in events.json().get("events", [])
+            if str(item.get("event_type") or "") == "forfeit"
+        ]
+        self.assertGreaterEqual(len(forfeit_events), 1)
+        self.assertGreater(int(forfeit_events[-1].get("step") or 0), 0)
+
+    def test_queue_dedupe_is_scoped_to_town(self) -> None:
+        town_a = f"town-{uuid.uuid4().hex[:8]}"
+        town_b = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_a)
+        self._publish_town(town_b)
+
+        agent = self._register_and_join(town_a, "TownMover", "owner-town-mover")
+        first = self.client.post(
+            "/api/v1/scenarios/werewolf_6p/queue/join",
+            headers={"Authorization": f"Bearer {agent['api_key']}"},
+        )
+        self.assertEqual(first.status_code, 200)
+        self.assertFalse(bool(first.json().get("result", {}).get("already_queued")))
+
+        moved = self.client.post(
+            "/api/v1/agents/me/join-town",
+            json={"town_id": town_b},
+            headers={"Authorization": f"Bearer {agent['api_key']}"},
+        )
+        self.assertEqual(moved.status_code, 200)
+
+        second = self.client.post(
+            "/api/v1/scenarios/werewolf_6p/queue/join",
+            headers={"Authorization": f"Bearer {agent['api_key']}"},
+        )
+        self.assertEqual(second.status_code, 200)
+        self.assertFalse(bool(second.json().get("result", {}).get("already_queued")))
+        self.assertEqual(
+            str(second.json().get("result", {}).get("entry", {}).get("town_id") or ""),
+            town_b,
+        )
+
+    def test_queue_join_uses_current_town_step_for_warmup_timing(self) -> None:
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+        roster = [
+            self._register_and_join(town_id, f"Warmup-{i}", f"warmup-owner-{i}")
+            for i in range(3)
+        ]
+
+        for _ in range(10):
+            tick = self.client.post(f"/api/v1/sim/towns/{town_id}/tick", json={"steps": 1})
+            self.assertEqual(tick.status_code, 200)
+
+        for agent in roster:
+            resp = self.client.post(
+                "/api/v1/scenarios/anaconda_standard/queue/join",
+                headers={"Authorization": f"Bearer {agent['api_key']}"},
+            )
+            self.assertEqual(resp.status_code, 200)
+
+        active_before = self.client.get(f"/api/v1/scenarios/towns/{town_id}/active")
+        self.assertEqual(active_before.status_code, 200)
+        self.assertGreaterEqual(active_before.json().get("count", 0), 1)
+        match_before = active_before.json()["matches"][0]
+        self.assertEqual(str(match_before.get("status") or ""), "warmup")
+
+        tick_once = self.client.post(f"/api/v1/sim/towns/{town_id}/tick", json={"steps": 1})
+        self.assertEqual(tick_once.status_code, 200)
+        active_after_one = self.client.get(f"/api/v1/scenarios/towns/{town_id}/active")
+        self.assertEqual(active_after_one.status_code, 200)
+        self.assertGreaterEqual(active_after_one.json().get("count", 0), 1)
+        match_after_one = active_after_one.json()["matches"][0]
+        self.assertEqual(str(match_after_one.get("status") or ""), "warmup")
+
+        tick_twice = self.client.post(f"/api/v1/sim/towns/{town_id}/tick", json={"steps": 1})
+        self.assertEqual(tick_twice.status_code, 200)
+        active_after_two = self.client.get(f"/api/v1/scenarios/towns/{town_id}/active")
+        self.assertEqual(active_after_two.status_code, 200)
+        self.assertGreaterEqual(active_after_two.json().get("count", 0), 1)
+        match_after_two = active_after_two.json()["matches"][0]
+        self.assertEqual(str(match_after_two.get("status") or ""), "active")
+
 
 if __name__ == "__main__":
     unittest.main()

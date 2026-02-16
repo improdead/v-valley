@@ -378,6 +378,10 @@ class RuntimeControlStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_latest_completed_step(self, *, town_id: str) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
     def record_dead_letter(
         self,
         *,
@@ -906,6 +910,28 @@ class SQLiteRuntimeControlStore(RuntimeControlStore):
             **decision_metrics,
         }
 
+    def get_latest_completed_step(self, *, town_id: str) -> int:
+        self.init_db()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT step_after
+                FROM town_tick_batches
+                WHERE town_id = ?
+                  AND status = 'completed'
+                  AND step_after IS NOT NULL
+                ORDER BY completed_at DESC, created_at DESC
+                LIMIT 1
+                """,
+                (str(town_id),),
+            ).fetchone()
+        if not row:
+            return 0
+        try:
+            return max(0, int(row["step_after"] or 0))
+        except Exception:
+            return 0
+
     def record_dead_letter(
         self,
         *,
@@ -1393,6 +1419,30 @@ class PostgresRuntimeControlStore(RuntimeControlStore):
             **decision_metrics,
         }
 
+    def get_latest_completed_step(self, *, town_id: str) -> int:
+        self.init_db()
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT step_after
+                    FROM town_tick_batches
+                    WHERE town_id = %s
+                      AND status = 'completed'
+                      AND step_after IS NOT NULL
+                    ORDER BY completed_at DESC NULLS LAST, created_at DESC
+                    LIMIT 1
+                    """,
+                    (str(town_id),),
+                )
+                row = cur.fetchone()
+        if not row:
+            return 0
+        try:
+            return max(0, int(row.get("step_after") or 0))
+        except Exception:
+            return 0
+
     def record_dead_letter(
         self,
         *,
@@ -1612,6 +1662,10 @@ def complete_tick_batch(
 
 def get_tick_metrics(*, town_id: str, window_hours: int = 24) -> dict[str, Any]:
     return _backend().get_tick_metrics(town_id=town_id, window_hours=window_hours)
+
+
+def get_latest_completed_step(*, town_id: str) -> int:
+    return _backend().get_latest_completed_step(town_id=town_id)
 
 
 def record_dead_letter(

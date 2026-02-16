@@ -577,11 +577,11 @@ class SQLiteScenarioStore(ScenarioStore):
             existing = conn.execute(
                 """
                 SELECT * FROM scenario_queue_entries
-                WHERE scenario_key = ? AND agent_id = ? AND status = 'queued'
+                WHERE scenario_key = ? AND town_id = ? AND agent_id = ? AND status = 'queued'
                 ORDER BY queued_at DESC
                 LIMIT 1
                 """,
-                (str(scenario_key), str(agent_id)),
+                (str(scenario_key), str(town_id), str(agent_id)),
             ).fetchone()
             if existing:
                 return self._queue_row(dict(existing))
@@ -631,6 +631,7 @@ class SQLiteScenarioStore(ScenarioStore):
                 JOIN scenario_match_participants p ON p.match_id = m.match_id
                 WHERE p.agent_id = ?
                   AND m.status IN ('forming', 'warmup', 'active')
+                  AND LOWER(COALESCE(p.status, '')) NOT IN ('done', 'forfeit', 'cancelled')
                 ORDER BY m.updated_at DESC
                 LIMIT 1
                 """,

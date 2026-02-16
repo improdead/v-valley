@@ -134,7 +134,13 @@ def _ensure_wallet_for_buy_in(*, agent_id: str, buy_in: int) -> dict[str, Any]:
     return wallet
 
 
-def join_queue(*, scenario_key: str, town_id: str, agent_id: str) -> dict[str, Any]:
+def join_queue(
+    *,
+    scenario_key: str,
+    town_id: str,
+    agent_id: str,
+    current_step: int | None = None,
+) -> dict[str, Any]:
     scenario = scenario_store.get_scenario(scenario_key=scenario_key)
     if not scenario or not bool(scenario.get("enabled", False)):
         raise ValueError(f"Scenario not found or disabled: {scenario_key}")
@@ -143,7 +149,11 @@ def join_queue(*, scenario_key: str, town_id: str, agent_id: str) -> dict[str, A
     if active_match is not None:
         raise RuntimeError("Agent is already in an active match")
 
-    existing = scenario_store.list_queue(scenario_key=scenario_key, status="queued")
+    existing = scenario_store.list_queue(
+        scenario_key=scenario_key,
+        town_id=town_id,
+        status="queued",
+    )
     for item in existing:
         if str(item.get("agent_id")) == str(agent_id):
             return {
@@ -166,7 +176,12 @@ def join_queue(*, scenario_key: str, town_id: str, agent_id: str) -> dict[str, A
         town_id=town_id,
         rating_snapshot=int(rating.get("rating") or 1500),
     )
-    formed = form_matches(town_id=town_id, scenario_key=scenario_key, current_step=0)
+    resolved_step = max(0, int(current_step)) if current_step is not None else 0
+    formed = form_matches(
+        town_id=town_id,
+        scenario_key=scenario_key,
+        current_step=resolved_step,
+    )
     return {
         "queued": True,
         "already_queued": False,
