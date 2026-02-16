@@ -39,9 +39,11 @@ const simControlModeInput = document.getElementById("simControlMode");
 const refreshScenariosBtn = document.getElementById("refreshScenariosBtn");
 const scenarioCardsContainer = document.getElementById("scenarioCardsContainer");
 const scenarioServerList = document.getElementById("scenarioServerList");
+const scenarioLeaderboardList = document.getElementById("scenarioLeaderboardList");
 const scenariosOutput = document.getElementById("scenariosOutput");
 const myScenarioQueueBtn = document.getElementById("myScenarioQueueBtn");
 const myScenarioMatchBtn = document.getElementById("myScenarioMatchBtn");
+const myScenarioForfeitBtn = document.getElementById("myScenarioForfeitBtn");
 const myScenarioOutput = document.getElementById("myScenarioOutput");
 const legacyListBtn = document.getElementById("legacyListBtn");
 const legacyReplayBtn = document.getElementById("legacyReplayBtn");
@@ -62,6 +64,26 @@ function toPrettyJson(v) {
   } catch {
     return String(v);
   }
+}
+
+function setStatLoading(el, loading) {
+  if (!el) return;
+  if (loading) {
+    el.classList.add("stat-loading");
+    el.textContent = "";
+  } else {
+    el.classList.remove("stat-loading");
+  }
+}
+
+function ratingTier(rating) {
+  const value = Number(rating || 0);
+  if (value >= 2100) return { label: "Diamond", cls: "tier-diamond", icon: "assets/scenarios/processed/shared/frames/badge_diamond.png" };
+  if (value >= 1900) return { label: "Platinum", cls: "tier-platinum", icon: "assets/scenarios/processed/shared/frames/badge_platinum.png" };
+  if (value >= 1700) return { label: "Gold", cls: "tier-gold", icon: "assets/scenarios/processed/shared/frames/badge_gold.png" };
+  if (value >= 1500) return { label: "Silver", cls: "tier-silver", icon: "assets/scenarios/processed/shared/frames/badge_silver.png" };
+  if (value >= 1300) return { label: "Bronze", cls: "tier-bronze", icon: "assets/scenarios/processed/shared/frames/badge_bronze.png" };
+  return { label: "Starter", cls: "tier-starter", icon: "assets/scenarios/processed/shared/frames/badge_starter.png" };
 }
 
 function guessDefaultApiBase() {
@@ -87,6 +109,22 @@ function persistApiBase() {
   const base = getApiBase();
   if (apiBaseInput) apiBaseInput.value = base;
   localStorage.setItem(API_BASE_KEY, base);
+}
+
+function preserveApiParamOnTownLinks() {
+  const api = new URLSearchParams(window.location.search).get("api");
+  if (!api) return;
+  document.querySelectorAll('a[href*="town.html"]').forEach((link) => {
+    const href = link.getAttribute("href");
+    if (!href) return;
+    try {
+      const url = new URL(href, window.location.href);
+      url.searchParams.set("api", api);
+      link.setAttribute("href", `${url.pathname}${url.search}${url.hash}`);
+    } catch {
+      // Keep original href when parsing fails.
+    }
+  });
 }
 
 async function apiJson(path, opts = {}) {
@@ -155,11 +193,15 @@ function initChecklist() {
 }
 
 async function loadApiStatus() {
+  setStatLoading(apiStateEl, true);
+  setStatLoading(templateCountEl, true);
   try {
     const healthResp = await fetch(`${getApiBase()}/healthz`);
     if (!healthResp.ok) throw new Error("health request failed");
+    setStatLoading(apiStateEl, false);
     apiStateEl.textContent = "online";
   } catch {
+    setStatLoading(apiStateEl, false);
     apiStateEl.textContent = "offline";
   }
 
@@ -167,14 +209,17 @@ async function loadApiStatus() {
     const tplResp = await fetch(`${getApiBase()}/api/v1/maps/templates`);
     if (!tplResp.ok) throw new Error("templates request failed");
     const payload = await tplResp.json();
+    setStatLoading(templateCountEl, false);
     templateCountEl.textContent = String(payload.count);
   } catch {
+    setStatLoading(templateCountEl, false);
     templateCountEl.textContent = "n/a";
   }
 }
 
 function initHeroParallax() {
   if (!heroArt) return;
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
 
   const maxShift = 6;
   window.addEventListener("pointermove", (event) => {
@@ -227,6 +272,7 @@ async function applyLowCostPreset() {
 async function refreshTowns() {
   if (!townsOutput) return;
   townsOutput.textContent = "Loading towns...";
+  setStatLoading(liveAgentsEl, true);
   try {
     const payload = await apiJson("/api/v1/towns");
     const towns = Array.isArray(payload.towns) ? payload.towns : [];
@@ -271,6 +317,7 @@ async function refreshTowns() {
       });
 
       if (liveAgentsEl) {
+        setStatLoading(liveAgentsEl, false);
         liveAgentsEl.textContent = String(totalAgents);
       }
     }
@@ -278,7 +325,10 @@ async function refreshTowns() {
     townsOutput.textContent = toPrettyJson(payload);
   } catch (err) {
     townsOutput.textContent = `ERROR: ${err.message}\n${toPrettyJson(err.payload || {})}`;
-    if (liveAgentsEl) liveAgentsEl.textContent = "n/a";
+    if (liveAgentsEl) {
+      setStatLoading(liveAgentsEl, false);
+      liveAgentsEl.textContent = "n/a";
+    }
   }
 }
 
@@ -375,6 +425,7 @@ async function refreshScenarios() {
     }
 
     await refreshScenarioServers();
+    await refreshScenarioLeaderboards(scenarios);
     scenariosOutput.textContent = toPrettyJson(payload);
   } catch (err) {
     scenariosOutput.textContent = `ERROR: ${err.message}\n${toPrettyJson(err.payload || {})}`;
@@ -438,6 +489,48 @@ async function refreshScenarioServers() {
   }
 }
 
+async function refreshScenarioLeaderboards(scenarios) {
+  if (!scenarioLeaderboardList) return;
+  scenarioLeaderboardList.innerHTML = "";
+  const items = Array.isArray(scenarios) ? scenarios : [];
+  if (items.length === 0) return;
+
+  for (const scenario of items) {
+    const scenarioKey = String(scenario.scenario_key || "");
+    if (!scenarioKey) continue;
+    let payload;
+    try {
+      payload = await apiJson(`/api/v1/scenarios/ratings/${encodeURIComponent(scenarioKey)}?limit=5`);
+    } catch {
+      payload = { leaderboard: [] };
+    }
+    const leaderboard = Array.isArray(payload.leaderboard) ? payload.leaderboard : [];
+    const card = document.createElement("article");
+    card.className = "town-card";
+    const rowsHtml = leaderboard.length
+      ? leaderboard
+          .slice(0, 5)
+          .map((entry, idx) => {
+            const tier = ratingTier(entry.rating);
+            const agentId = String(entry.agent_id || "");
+            return `
+              <div class="leaderboard-row">
+                <span>#${idx + 1} ${agentId.slice(0, 10)}</span>
+                <span class="tier-badge ${tier.cls}"><img class="tier-badge-icon" src="${tier.icon}" alt="${tier.label}" />${tier.label}</span>
+                <span>${Number(entry.rating || 0)}</span>
+              </div>
+            `;
+          })
+          .join("")
+      : '<div class="leaderboard-empty">No ranked matches yet.</div>';
+    card.innerHTML = `
+      <h3>${scenario.name || scenarioKey}</h3>
+      ${rowsHtml}
+    `;
+    scenarioLeaderboardList.appendChild(card);
+  }
+}
+
 async function loadMyScenarioQueue() {
   if (!myScenarioOutput) return;
   const key = getCurrentApiKey();
@@ -475,6 +568,35 @@ async function loadMyScenarioMatch() {
       const watchUrl = `./town.html?api=${encodeURIComponent(base)}&town=${encodeURIComponent(payload.match.town_id)}`;
       myScenarioOutput.textContent += `\n\nWatch in town viewer: ${watchUrl}`;
     }
+  } catch (err) {
+    myScenarioOutput.textContent = `ERROR: ${err.message}\n${toPrettyJson(err.payload || {})}`;
+  }
+}
+
+async function forfeitMyScenarioMatch() {
+  if (!myScenarioOutput) return;
+  const key = getCurrentApiKey();
+  if (!key) {
+    myScenarioOutput.textContent = "ERROR: missing API key in /me section";
+    return;
+  }
+  myScenarioOutput.textContent = "Checking active match...";
+  try {
+    const me = await apiJson("/api/v1/scenarios/me/match", {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    const matchId = String(me?.match?.match_id || "");
+    if (!me?.active || !matchId) {
+      myScenarioOutput.textContent = "No active match to forfeit.";
+      return;
+    }
+    myScenarioOutput.textContent = `Forfeiting ${matchId}...`;
+    const payload = await apiJson(`/api/v1/scenarios/matches/${encodeURIComponent(matchId)}/forfeit`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    myScenarioOutput.textContent = toPrettyJson(payload);
+    await refreshScenarios();
   } catch (err) {
     myScenarioOutput.textContent = `ERROR: ${err.message}\n${toPrettyJson(err.payload || {})}`;
   }
@@ -764,7 +886,8 @@ async function onLegacyImportClick() {
 
 function initOnboardingConsole() {
   if (!apiBaseInput) return;
-  apiBaseInput.value = normalizeBase(localStorage.getItem(API_BASE_KEY)) || guessDefaultApiBase();
+  const apiFromQuery = normalizeBase(new URLSearchParams(window.location.search).get("api"));
+  apiBaseInput.value = apiFromQuery || normalizeBase(localStorage.getItem(API_BASE_KEY)) || guessDefaultApiBase();
   apiBaseInput.addEventListener("change", () => {
     persistApiBase();
     loadApiStatus();
@@ -793,6 +916,7 @@ function initOnboardingConsole() {
   });
   myScenarioQueueBtn?.addEventListener("click", loadMyScenarioQueue);
   myScenarioMatchBtn?.addEventListener("click", loadMyScenarioMatch);
+  myScenarioForfeitBtn?.addEventListener("click", forfeitMyScenarioMatch);
   legacyListBtn?.addEventListener("click", onLegacyListClick);
   legacyReplayBtn?.addEventListener("click", onLegacyReplayClick);
   legacyImportBtn?.addEventListener("click", onLegacyImportClick);
@@ -833,6 +957,7 @@ function initOnboardingConsole() {
 initChecklist();
 initOnboardingConsole();
 persistApiBase();
+preserveApiParamOnTownLinks();
 loadApiStatus();
 refreshSetupInfo();
 refreshTowns();

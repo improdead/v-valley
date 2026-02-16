@@ -30,14 +30,14 @@ from ..storage.runtime_control import (
 from .scenario_matchmaker import (
     advance_matches,
     form_matches,
-    get_town_agent_scenario_statuses,
-    list_active_matches_for_town,
+    get_town_scenario_manager,
 )
 from .interaction_sink import ingest_tick_outcomes
 
 
 logger = logging.getLogger("vvalley_api.runtime_scheduler")
 WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
+_SCENARIO_MANAGER = get_town_scenario_manager()
 
 
 def _utc_now() -> datetime:
@@ -204,7 +204,7 @@ class TownRuntimeScheduler:
                     planner=self._planner.plan_move,
                     agent_autonomy=autonomy_map,
                     cognition_planner=self._planner,
-                    scenario_agent_statuses=get_town_agent_scenario_statuses(town_id=town_id),
+                    scenario_agent_statuses=_SCENARIO_MANAGER.statuses_for_town(town_id=town_id),
                 )
                 try:
                     ingest_tick_outcomes(
@@ -224,11 +224,12 @@ class TownRuntimeScheduler:
                 advanced_matches = advance_matches(
                     town_id=town_id,
                     current_step=int(ticked.get("step") or 0),
+                    cognition_planner=self._planner,
                 )
                 ticked["scenario"] = {
                     "formed_count": len(formed_matches),
                     "advanced_count": len(advanced_matches),
-                    "active_matches": list_active_matches_for_town(town_id=town_id),
+                    "active_matches": _SCENARIO_MANAGER.active_for_town(town_id=town_id),
                 }
                 complete_tick_batch(
                     town_id=town_id,

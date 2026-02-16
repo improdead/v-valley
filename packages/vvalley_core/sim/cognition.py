@@ -489,6 +489,122 @@ def _heuristic_social_attitude(context: dict[str, Any]) -> dict[str, Any]:
     return {"attitude": "neutral", "relationship_delta": 0.6}
 
 
+def _pick_hash_candidate(seed: str, candidates: list[str]) -> str | None:
+    clean = [str(value).strip() for value in candidates if str(value).strip()]
+    if not clean:
+        return None
+    idx = _hash_int(seed) % len(clean)
+    return clean[idx]
+
+
+def _heuristic_werewolf_target(context: dict[str, Any]) -> dict[str, Any]:
+    candidates = [str(value) for value in (context.get("candidate_agent_ids") or []) if str(value)]
+    suspicion = context.get("suspicion") or {}
+    if not isinstance(suspicion, dict):
+        suspicion = {}
+    if candidates:
+        ranked = sorted(
+            candidates,
+            key=lambda aid: (-int(suspicion.get(aid, 0)), str(aid)),
+        )
+        return {"target_agent_id": ranked[0]}
+    return {"target_agent_id": None}
+
+
+def _heuristic_werewolf_protect(context: dict[str, Any]) -> dict[str, Any]:
+    candidates = [str(value) for value in (context.get("candidate_agent_ids") or []) if str(value)]
+    suspicion = context.get("suspicion") or {}
+    if not isinstance(suspicion, dict):
+        suspicion = {}
+    if not candidates:
+        return {"target_agent_id": None}
+    ranked = sorted(candidates, key=lambda aid: (-int(suspicion.get(aid, 0)), str(aid)))
+    return {"target_agent_id": ranked[0]}
+
+
+def _heuristic_werewolf_inspect(context: dict[str, Any]) -> dict[str, Any]:
+    candidates = [str(value) for value in (context.get("candidate_agent_ids") or []) if str(value)]
+    if not candidates:
+        return {"target_agent_id": None}
+    seed = f"inspect:{context.get('agent_id')}:{context.get('round_number')}:{context.get('step')}"
+    return {"target_agent_id": _pick_hash_candidate(seed, candidates)}
+
+
+def _heuristic_werewolf_speech(context: dict[str, Any]) -> dict[str, Any]:
+    role = str(context.get("role") or "").strip().lower()
+    suggested = str(context.get("suggested_target") or "").strip()
+    alive = [str(value) for value in (context.get("alive_agent_ids") or []) if str(value)]
+    target = suggested or _pick_hash_candidate(
+        f"speech:{context.get('agent_id')}:{context.get('step')}",
+        [aid for aid in alive if aid != str(context.get("agent_id") or "")],
+    )
+    if role in {"werewolf", "alpha_werewolf"} and target:
+        return {"target_agent_id": target, "line": f"{target} feels too quiet. Something is off."}
+    if target:
+        return {"target_agent_id": target, "line": f"I suspect {target} based on yesterday's vote."}
+    return {"target_agent_id": None, "line": "I need more discussion before voting."}
+
+
+def _heuristic_werewolf_vote(context: dict[str, Any]) -> dict[str, Any]:
+    candidates = [str(value) for value in (context.get("alive_agent_ids") or []) if str(value)]
+    suspicion = context.get("suspicion") or {}
+    if not isinstance(suspicion, dict):
+        suspicion = {}
+    if not candidates:
+        return {"target_agent_id": None}
+    ranked = sorted(candidates, key=lambda aid: (-int(suspicion.get(aid, 0)), str(aid)))
+    return {"target_agent_id": ranked[0]}
+
+
+def _card_rank_value(card: str) -> int:
+    face = str(card).upper()[:1]
+    mapping = {
+        "2": 2,
+        "3": 3,
+        "4": 4,
+        "5": 5,
+        "6": 6,
+        "7": 7,
+        "8": 8,
+        "9": 9,
+        "T": 10,
+        "J": 11,
+        "Q": 12,
+        "K": 13,
+        "A": 14,
+    }
+    return mapping.get(face, 0)
+
+
+def _heuristic_anaconda_pass_cards(context: dict[str, Any]) -> dict[str, Any]:
+    hand = [str(card).upper() for card in (context.get("hand") or []) if str(card)]
+    try:
+        count = max(1, int(context.get("count") or 1))
+    except Exception:
+        count = 1
+    if len(hand) <= count:
+        return {"cards": hand[:count]}
+    ranked = sorted(hand, key=lambda card: (_card_rank_value(card), card))
+    return {"cards": ranked[:count]}
+
+
+def _heuristic_anaconda_bet(context: dict[str, Any]) -> dict[str, Any]:
+    stack = max(0, int(context.get("stack") or 0))
+    visible = max(0, int(context.get("visible_cards") or 0))
+    pot = max(0, int(context.get("pot") or 0))
+    if stack <= 0:
+        return {"bet": 0, "fold": False, "all_in": True}
+
+    base = 2 + (visible * 2)
+    pressure = min(6, pot // 30)
+    bet = min(stack, max(0, base + pressure))
+    if stack <= max(3, bet // 2) and visible >= 3:
+        return {"bet": 0, "fold": True, "all_in": False}
+    if stack <= bet:
+        return {"bet": stack, "fold": False, "all_in": True}
+    return {"bet": bet, "fold": False, "all_in": False}
+
+
 class CognitionPlanner:
     """Planner facade with situation-dependent policy routing."""
 
@@ -647,4 +763,60 @@ class CognitionPlanner:
             task_name="social_attitude",
             context=context,
             heuristic_fn=_heuristic_social_attitude,
+        )
+
+    def werewolf_choose_target(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Night kill target selection for werewolf roles."""
+        return self._run_task(
+            task_name="werewolf_night_kill",
+            context=context,
+            heuristic_fn=_heuristic_werewolf_target,
+        )
+
+    def werewolf_choose_protect(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Night protection target selection for doctor role."""
+        return self._run_task(
+            task_name="werewolf_doctor_protect",
+            context=context,
+            heuristic_fn=_heuristic_werewolf_protect,
+        )
+
+    def werewolf_choose_inspect(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Night inspection target selection for seer role."""
+        return self._run_task(
+            task_name="werewolf_seer_inspect",
+            context=context,
+            heuristic_fn=_heuristic_werewolf_inspect,
+        )
+
+    def werewolf_generate_speech(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Day discussion line generation for werewolf scenario."""
+        return self._run_task(
+            task_name="werewolf_discussion",
+            context=context,
+            heuristic_fn=_heuristic_werewolf_speech,
+        )
+
+    def werewolf_choose_vote(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Day vote target selection for werewolf scenario."""
+        return self._run_task(
+            task_name="werewolf_vote",
+            context=context,
+            heuristic_fn=_heuristic_werewolf_vote,
+        )
+
+    def anaconda_choose_bet(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Bet sizing/fold/all-in decision for Anaconda rounds."""
+        return self._run_task(
+            task_name="anaconda_bet",
+            context=context,
+            heuristic_fn=_heuristic_anaconda_bet,
+        )
+
+    def anaconda_choose_pass_cards(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Card passing choice for Anaconda pass rounds."""
+        return self._run_task(
+            task_name="anaconda_pass",
+            context=context,
+            heuristic_fn=_heuristic_anaconda_pass_cards,
         )

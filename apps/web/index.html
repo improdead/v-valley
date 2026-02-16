@@ -343,6 +343,8 @@
             <div id="scenarioCardsContainer" class="town-grid"></div>
             <h3 class="subsection-title">Live Servers</h3>
             <div id="scenarioServerList" class="town-grid"></div>
+            <h3 class="subsection-title">Leaderboards</h3>
+            <div id="scenarioLeaderboardList" class="town-grid"></div>
             <pre id="scenariosOutput" class="output"></pre>
           </article>
 
@@ -351,6 +353,7 @@
             <div class="row-inline">
               <button class="btn btn-small" id="myScenarioQueueBtn" type="button">Get My Queue</button>
               <button class="btn btn-small btn-ghost" id="myScenarioMatchBtn" type="button">Get My Match</button>
+              <button class="btn btn-small btn-ghost" id="myScenarioForfeitBtn" type="button">Forfeit Active Match</button>
             </div>
             <pre id="myScenarioOutput" class="output"></pre>
           </article>
@@ -419,13 +422,21 @@
 
     <script src="./app.js"></script>
     <script>
-      // Preserve ?api= param on Town Viewer link
+      // Preserve ?api= param on static Town Viewer links before app.js boots.
       (function() {
         const api = new URLSearchParams(window.location.search).get("api");
-        if (api) {
-          const link = document.getElementById("townViewerLink");
-          if (link) link.href = `./town.html?api=${encodeURIComponent(api)}`;
-        }
+        if (!api) return;
+        document.querySelectorAll('a[href*="town.html"]').forEach((link) => {
+          const href = link.getAttribute("href");
+          if (!href) return;
+          try {
+            const url = new URL(href, window.location.href);
+            url.searchParams.set("api", api);
+            link.setAttribute("href", `${url.pathname}${url.search}${url.hash}`);
+          } catch {
+            // Keep existing href if parse fails.
+          }
+        });
       })();
     </script>
   </body>

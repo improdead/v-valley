@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
@@ -129,6 +130,25 @@ class SimApiTests(unittest.TestCase):
             self.assertLess(int(npc["y"]), int(after_payload["map_height"]))
             self.assertIn("memory_summary", npc)
             self.assertGreaterEqual(int(npc["memory_summary"]["total_nodes"]), 1)
+
+    def test_state_stream_endpoint_emits_sse_state(self) -> None:
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+        self._register_and_join(town_id, "StreamAlice", "owner-stream-a")
+        resp = self.client.get(
+            f"/api/v1/sim/towns/{town_id}/events/stream?interval_ms=500&max_events=1"
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("text/event-stream", resp.headers.get("content-type", ""))
+        body = str(resp.text or "")
+        self.assertIn("event: state", body)
+        data_lines = [line for line in body.splitlines() if line.startswith("data: ")]
+        self.assertTrue(bool(data_lines))
+        payload = json.loads(data_lines[-1][len("data: "):])
+        self.assertTrue(bool(payload.get("ok")))
+        self.assertEqual(str(payload.get("town_id")), town_id)
+        self.assertIn("state", payload)
+        self.assertIn("npcs", payload.get("state", {}))
 
     def test_state_resets_when_active_map_changes(self) -> None:
         town_id = f"town-{uuid.uuid4().hex[:8]}"

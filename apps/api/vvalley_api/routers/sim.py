@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 from typing import Any, Optional
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException, Header, Query
+from fastapi import APIRouter, HTTPException, Header, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from packages.vvalley_core.maps.map_utils import load_map
@@ -47,8 +50,7 @@ from ..storage.runtime_control import (
 from ..services.scenario_matchmaker import (
     advance_matches,
     form_matches,
-    get_town_agent_scenario_statuses,
-    list_active_matches_for_town,
+    get_town_scenario_manager,
 )
 from ..services.runtime_scheduler import (
     start_town_runtime_scheduler,
@@ -62,6 +64,7 @@ logger = logging.getLogger("vvalley_api.sim")
 router = APIRouter(prefix="/api/v1/sim", tags=["sim"])
 WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
 _COGNITION_PLANNER = CognitionPlanner(policy_lookup=get_llm_policy, log_sink=insert_call_log)
+_SCENARIO_MANAGER = get_town_scenario_manager()
 PLANNING_SCOPE_PATTERN = "^(short_action|short|daily_plan|daily|long_term_plan|long_term|long)$"
 CONTROL_MODE_PATTERN = "^(external|autopilot|hybrid)$"
 NODE_KIND_PATTERN = "^(event|thought|chat|reflection)$"
@@ -186,7 +189,7 @@ def _require_agent_membership(*, town_id: str, authorization: Optional[str]) -> 
 
 
 def _augment_state_with_scenarios(*, town_id: str, state: dict[str, Any]) -> dict[str, Any]:
-    active_matches = list_active_matches_for_town(town_id=town_id)
+    active_matches = _SCENARIO_MANAGER.active_for_town(town_id=town_id)
     participant_map: dict[str, dict[str, Any]] = {}
     for match in active_matches:
         match_id = str(match.get("match_id") or "")
@@ -214,14 +217,18 @@ def _augment_state_with_scenarios(*, town_id: str, state: dict[str, Any]) -> dic
         if scenario_payload:
             npc["scenario"] = scenario_payload
             npc["status"] = str(scenario_payload.get("status") or npc.get("status") or "scenario_active")
+        else:
+            npc.pop("scenario", None)
+            if str(npc.get("status") or "").startswith("scenario_"):
+                memory_summary = npc.get("memory_summary") or {}
+                fallback_status = str(memory_summary.get("active_action") or "").strip().lower()
+                npc["status"] = fallback_status or "idle"
     state["scenario_match_count"] = len(active_matches)
     state["scenario_matches"] = active_matches
     return state
 
 
-@router.get("/towns/{town_id}/state")
-def town_state(town_id: str) -> dict[str, Any]:
-    logger.info("[SIM] State request: town_id='%s'", town_id)
+def _build_stream_payload(*, town_id: str) -> dict[str, Any]:
     active, map_data, members = _load_runtime_inputs(town_id)
     state = get_simulation_state(
         town_id=town_id,
@@ -240,6 +247,63 @@ def town_state(town_id: str) -> dict[str, Any]:
         },
         "state": state,
     }
+
+
+@router.get("/towns/{town_id}/state")
+def town_state(town_id: str) -> dict[str, Any]:
+    logger.info("[SIM] State request: town_id='%s'", town_id)
+    return _build_stream_payload(town_id=town_id)
+
+
+@router.get("/towns/{town_id}/events/stream")
+async def town_events_stream(
+    town_id: str,
+    request: Request,
+    interval_ms: int = Query(default=1000, ge=500, le=10000),
+    max_events: int = Query(default=0, ge=0, le=500),
+) -> StreamingResponse:
+    logger.info(
+        "[SIM] Event stream request: town_id='%s', interval_ms=%d, max_events=%d",
+        town_id,
+        interval_ms,
+        max_events,
+    )
+    # Validate town/map upfront before opening stream.
+    _load_runtime_inputs(town_id)
+    interval_seconds = max(0.5, float(interval_ms) / 1000.0)
+
+    async def _gen() -> Any:
+        # EventSource reconnection hint (3s).
+        yield "retry: 3000\n\n"
+        emitted = 0
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                payload = _build_stream_payload(town_id=town_id)
+                data = json.dumps(payload, separators=(",", ":"))
+                yield f"event: state\ndata: {data}\n\n"
+            except Exception as exc:
+                err = {
+                    "ok": False,
+                    "town_id": town_id,
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
+                yield f"event: error\ndata: {json.dumps(err, separators=(',', ':'))}\n\n"
+            emitted += 1
+            if int(max_events) > 0 and emitted >= int(max_events):
+                break
+            await asyncio.sleep(interval_seconds)
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/towns/{town_id}/agents/{agent_id}/memory")
@@ -452,7 +516,7 @@ def town_tick(town_id: str, req: TickTownRequest) -> dict[str, Any]:
 
         autonomy_map = _autonomy_map_for_members(members)
         try:
-            scenario_agent_statuses = get_town_agent_scenario_statuses(town_id=town_id)
+            scenario_agent_statuses = _SCENARIO_MANAGER.statuses_for_town(town_id=town_id)
             ticked = tick_simulation(
                 town_id=town_id,
                 active_version=active,
@@ -487,11 +551,12 @@ def town_tick(town_id: str, req: TickTownRequest) -> dict[str, Any]:
             advanced_matches = advance_matches(
                 town_id=town_id,
                 current_step=int(ticked.get("step") or 0),
+                cognition_planner=_COGNITION_PLANNER,
             )
             ticked["scenario"] = {
                 "formed_count": len(formed_matches),
                 "advanced_count": len(advanced_matches),
-                "active_matches": list_active_matches_for_town(town_id=town_id),
+                "active_matches": _SCENARIO_MANAGER.active_for_town(town_id=town_id),
             }
             complete_tick_batch(
                 town_id=town_id,

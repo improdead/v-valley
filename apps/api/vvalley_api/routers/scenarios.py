@@ -9,14 +9,16 @@ from fastapi import APIRouter, Header, HTTPException, Query
 
 from ..services.scenario_matchmaker import (
     advance_matches,
+    cancel_match,
+    forfeit_match,
     form_matches,
     get_agent_active_match,
     get_agent_queue_status,
     get_match_payload,
     get_spectator_payload,
+    get_town_scenario_manager,
     join_queue,
     leave_queue,
-    list_active_matches_for_town,
 )
 from ..storage import scenarios as scenario_store
 from ..storage.agents import get_agent_by_api_key, get_agent_town
@@ -25,6 +27,7 @@ from ..storage.agents import get_agent_by_api_key, get_agent_town
 logger = logging.getLogger("vvalley_api.scenarios")
 
 router = APIRouter(prefix="/api/v1/scenarios", tags=["scenarios"])
+_SCENARIO_MANAGER = get_town_scenario_manager()
 
 
 class QueueJoinResponse(dict):
@@ -146,16 +149,70 @@ def match_spectate(match_id: str) -> dict[str, Any]:
     return {"ok": True, **payload}
 
 
+@router.post("/matches/{match_id}/forfeit")
+def match_forfeit(
+    match_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    agent = _require_agent(authorization)
+    try:
+        match = forfeit_match(
+            match_id=match_id,
+            agent_id=str(agent["id"]),
+            current_step=0,
+            reason="Player forfeited",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "match_id": str(match_id),
+        "agent_id": str(agent["id"]),
+        "match": match,
+    }
+
+
+@router.post("/matches/{match_id}/cancel")
+def match_cancel(
+    match_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    agent = _require_agent(authorization)
+    try:
+        match = cancel_match(
+            match_id=match_id,
+            requested_by_agent_id=str(agent["id"]),
+            current_step=0,
+            reason="Cancelled by participant",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "match_id": str(match_id),
+        "agent_id": str(agent["id"]),
+        "match": match,
+    }
+
+
 @router.get("/towns/{town_id}/active")
 def town_active_matches(town_id: str) -> dict[str, Any]:
-    matches = list_active_matches_for_town(town_id=town_id)
+    matches = _SCENARIO_MANAGER.active_for_town(town_id=town_id)
     return {"ok": True, "town_id": town_id, "count": len(matches), "matches": matches}
 
 
 @router.get("/servers")
 def list_servers(town_id: Optional[str] = Query(default=None)) -> dict[str, Any]:
     if town_id:
-        matches = list_active_matches_for_town(town_id=town_id)
+        matches = _SCENARIO_MANAGER.active_for_town(town_id=town_id)
         return {"ok": True, "count": len(matches), "servers": matches}
 
     raw = scenario_store.list_active_matches(town_id=None)

@@ -10,6 +10,7 @@ from .cards import (
     make_shuffled_deck,
 )
 from .rating import compute_pairwise_elo_updates
+from .manager import ScenarioRuntimeState, TownScenarioManager
 
 __all__ = [
     "arrange_reveal_order",
@@ -20,4 +21,6 @@ __all__ = [
     "hand_category_label",
     "make_shuffled_deck",
     "compute_pairwise_elo_updates",
+    "ScenarioRuntimeState",
+    "TownScenarioManager",
 ]

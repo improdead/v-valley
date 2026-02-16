@@ -156,7 +156,8 @@ v-valley/
 │       └── assets/                   # Visual assets (tilesets, sprites)
 │           ├── map/                  # Tilemap + tileset PNGs
 │           ├── characters/           # 25 character sprites + atlas
-│           └── speech_bubble/        # Speech bubble overlay
+│           ├── speech_bubble/        # Speech bubble overlay
+│           └── scenarios/            # Scenario atlases (werewolf/anaconda/shared)
 │
 ├── packages/
 │   └── vvalley_core/                 # Core library (no framework deps)
@@ -164,6 +165,10 @@ v-valley/
 │       │   ├── runner.py             # Simulation engine
 │       │   ├── memory.py             # Agent memory system
 │       │   ├── cognition.py          # Cognition planner + heuristics
+│       │   ├── scenarios/            # Shared scenario runtime modules
+│       │   │   ├── cards.py          # Card/shuffle/evaluator utilities
+│       │   │   ├── rating.py         # Elo utility helpers
+│       │   │   └── manager.py        # ScenarioRuntimeState + TownScenarioManager
 │       │   ├── legacy_replay.py      # GA replay bridge
 │       │   └── legacy_map_import.py  # GA map converter
 │       ├── maps/
@@ -173,7 +178,7 @@ v-valley/
 │       │   ├── customize.py          # No-code map customization
 │       │   └── templates.py          # Template discovery
 │       ├── llm/
-│       │   ├── policy.py             # 24 task policies, tier routing
+│       │   ├── policy.py             # 31 task policies, tier routing
 │       │   ├── providers.py          # OpenAI-compatible provider adapter
 │       │   └── task_runner.py        # Policy-aware execution + fallback
 │       └── db/
@@ -204,7 +209,9 @@ v-valley/
 │       └── test_map_tools.py
 │
 ├── scripts/
-│   └── convert_ville_map.py          # GA → V-Valley map converter
+│   ├── convert_ville_map.py          # GA → V-Valley map converter
+│   ├── build_scenario_assets.py      # Deterministic scenario atlas generator
+│   └── benchmark_scenario_runtime.py # Queue/match/runtime performance harness
 │
 ├── generative_agents/                # Original Stanford GA code (reference)
 │
@@ -779,8 +786,9 @@ A single-page admin interface with:
 - Town join / leave controls
 - Simulation tick controls (steps, scope, mode)
 - Town directory browser
-- Scenario browser (available games, queue status, join/leave queue, my active match)
+- Scenario browser (available games, queue status, join/leave queue, my active match, self-forfeit)
 - Live server browser (active scenario matches across towns)
+- Scenario leaderboards with tier badges
 - Legacy GA bridge (list, replay, import)
 - LLM policy management
 
@@ -806,11 +814,15 @@ A **Phaser 3** game that renders the town simulation live:
 **API Integration:**
 - Auto-detects API base URL
 - Town selector populated from `GET /api/v1/towns`
-- State polling every 3 seconds
+- Primary real-time transport via `GET /api/v1/sim/towns/{town_id}/events/stream` (SSE) with automatic fallback to 3s polling
 - Manual tick button and auto-tick toggle
 - Agent sidebar with clickable cards (camera follows clicked agent)
 - Active games sidebar from scenario endpoints (`/api/v1/scenarios/towns/{town_id}/active`)
-- Spectator modal polling (`/api/v1/scenarios/matches/{match_id}/spectate`)
+- Scenario spectator fetch loop (`/api/v1/scenarios/matches/{match_id}/spectate`) powering dedicated Werewolf/Anaconda boards
+- Spectator controls: role visibility toggle, replay timeline, vote/pot tracker, phase banner, transcript modal
+- Town replay modal for recent state snapshots (scrub/play/return-live)
+- Relationship graph modal from `memory_summary.top_relationships`
+- Spectator summary includes winner flags, rating deltas, and payout chips when resolved
 
 **Camera Controls:**
 - Arrow keys / WASD for panning

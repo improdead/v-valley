@@ -64,7 +64,7 @@ Each agent has an `AgentMemory` with four components:
 
 ### cognition.py — Cognition adapters
 
-`CognitionPlanner` provides methods for every cognitive task (16 methods, each with a deterministic heuristic fallback):
+`CognitionPlanner` provides methods for every cognitive task (23 methods, each with a deterministic heuristic fallback):
 
 | Method | Purpose |
 |--------|---------|
@@ -86,6 +86,13 @@ Each agent has an `AgentMemory` with four components:
 | `generate_relationship_summary` | Narrative relationship summary to ground a conversation |
 | `generate_first_daily_plan` | Exploratory first-day schedule for newly arrived agents |
 | `recompose_schedule` | Rewrite daily schedule after a reaction or chat interruption |
+| `werewolf_choose_target` | Pick night kill target in Werewolf |
+| `werewolf_choose_protect` | Pick doctor protection target in Werewolf |
+| `werewolf_choose_inspect` | Pick seer inspection target in Werewolf |
+| `werewolf_generate_speech` | Generate day discussion line in Werewolf |
+| `werewolf_choose_vote` | Pick day vote target in Werewolf |
+| `anaconda_choose_bet` | Bet/fold/all-in choice in Anaconda rounds |
+| `anaconda_choose_pass_cards` | Card passing choice in Anaconda pass rounds |
 
 The simulation never requires an LLM to function.
 
@@ -112,15 +119,15 @@ Each cognition task has its own policy controlling:
 - Timeout and retry limits
 - Prompt cache enablement
 
-24 task policies are defined by default, covering all 16 cognition methods plus additional scopes (`perceive`, `retrieve`, `short_action`, `daily_plan`, `long_term_plan`, `reflect`, `persona_gen`, `schedule_recomposition`). Two presets are available:
+31 task policies are defined by default, including scenario-specific decision tasks (`werewolf_*`, `anaconda_*`) in addition to baseline planning/retrieval scopes. Two presets are available:
 - `fun-low-cost` — routes everything to cheap/heuristic tiers
 - `situational-default` — mixed tiers based on task complexity
 
 ### Provider adapter
 
 A single `providers.py` handles all LLM calls via the OpenAI-compatible Chat Completions API. Features:
-- JSON Schema structured output for 21 task schemas (19 explicit + 2 dynamically generated)
-- Task-specific system/user prompts (20 prompt pairs defined)
+- JSON Schema structured output for core cognition tasks, with generic fallback handling for dynamically added tasks
+- Task-specific system/user prompts for baseline cognition tasks, plus generic prompt fallback for new task names
 - Per-tier model and base URL configuration (with per-tier environment variable overrides)
 - Local schema validation + repair retry before heuristic fallback
 - Context trimming to fit token budgets
@@ -137,8 +144,8 @@ The API lives in `apps/api/` with FastAPI routers organized by domain:
 | `/api/v1/agents/me/inbox` | Agent notification inbox |
 | `/api/v1/owners` | Owner escalation queue |
 | `/api/v1/towns` | Observer-mode town directory |
-| `/api/v1/sim` | State, tick, runtime control, memory, context, actions, dead letters |
-| `/api/v1/scenarios` | Scenario matchmaking, match lifecycle, spectator payloads, ratings, wallet |
+| `/api/v1/sim` | State, tick, SSE state stream (`/events/stream`), runtime control, memory, context, actions, dead letters |
+| `/api/v1/scenarios` | Scenario matchmaking, match lifecycle (including forfeit/cancel), spectator payloads, ratings, wallet |
 | `/api/v1/maps` | Validate, bake, customize, scaffold, publish, version management |
 | `/api/v1/llm` | Policy CRUD, call logs, presets |
 | `/api/v1/legacy` | Import/replay from original Generative Agents |
@@ -166,7 +173,7 @@ Six storage modules (scenario storage is SQLite-first today):
 3. Reserves a tick batch for idempotency
 4. Runs the simulation tick
 5. Forms scenario matches from queued agents
-6. Advances active scenario matches
+6. Advances active scenario matches (with auto-forfeit when participants leave the town)
 7. Ingests outcomes into inbox/escalation items
 8. Records failures as dead letters
 

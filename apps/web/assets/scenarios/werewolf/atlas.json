@@ -1,0 +1,159 @@
+{
+  "frames": [
+    {
+      "filename": "campfire",
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "moon",
+      "frame": {
+        "x": 32,
+        "y": 0,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "wolf_head",
+      "frame": {
+        "x": 64,
+        "y": 0,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "villager_badge",
+      "frame": {
+        "x": 96,
+        "y": 0,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "seer_eye",
+      "frame": {
+        "x": 0,
+        "y": 32,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "doctor_cross",
+      "frame": {
+        "x": 32,
+        "y": 32,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "vote_gavel",
+      "frame": {
+        "x": 64,
+        "y": 32,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "elimination_skull",
+      "frame": {
+        "x": 96,
+        "y": 32,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "day_banner",
+      "frame": {
+        "x": 0,
+        "y": 64,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "night_banner",
+      "frame": {
+        "x": 32,
+        "y": 64,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    }
+  ],
+  "meta": {
+    "pack": "werewolf",
+    "generator": "scripts/build_scenario_assets.py",
+    "tile_size": 32,
+    "columns": 4,
+    "rows": 3,
+    "palette": [
+      "transparent",
+      "night_0",
+      "night_1",
+      "night_2",
+      "wood",
+      "ember",
+      "fire",
+      "sun",
+      "cyan",
+      "leaf_0",
+      "leaf_1",
+      "leaf_2",
+      "silver",
+      "slate",
+      "white",
+      "ink"
+    ]
+  }
+}

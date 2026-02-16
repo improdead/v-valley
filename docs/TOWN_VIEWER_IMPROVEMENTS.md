@@ -6,7 +6,7 @@
 
 ---
 
-**Status** `Implemented (P0 Core + Partial P1)` · **Last Updated** `2026-02-15`  
+**Status** `Implemented (P0 + P2 Complete)` · **Last Updated** `2026-02-16`  
 **Design North Star:** *When a spectator opens the town viewer, they should feel like they're peering through the window of a tiny living world — not polling a dashboard.*
 
 </div>
@@ -31,7 +31,7 @@ Most of this can be fixed on the frontend, with small backend additions for scen
 
 ---
 
-## ✅ Current Implementation Snapshot (As Of 2026-02-15)
+## ✅ Current Implementation Snapshot (As Of 2026-02-16)
 
 ### Shipped now
 
@@ -43,17 +43,23 @@ Most of this can be fixed on the frontend, with small backend additions for scen
 - Conversation cards now show agent names (not raw IDs)
 - Day/night visual overlay tied to simulation clock
 - Active games section in sidebar with `Watch Live` spectator modal
+- Spectator modal match summary now includes winner markers + rating delta + chip outcomes
 - Scenario markers on agent cards and map labels for in-match agents
+- Agent detail drawer (live profile panel on focus/click)
+- Conversation transcript modal with turn-by-turn speaker/step details + jump-to-agents camera action
+- Location interaction layer on map (sector hover tooltip + click-to-open occupant panel)
 - Zoom controls (`+` / `-`) and responsive layout improvements
 - Landing-page town card deep-link fix (`town.html?api=...&town=...`)
-
-### Still pending from this plan
-
-- Conversation transcript detail modal
-- Agent detail drawer with memory/relationship deep dive
-- Full location interaction layer from Tiled location objects
-- SSE streaming replacement for polling
-- Relationship graph, replay/rewind, richer ambient polish
+- Landing page polish pass: preserved `?api=` across Town Viewer links, loading shimmer for live stats, reduced-motion support
+- Landing page scenario panel now includes live server actions, leaderboard cards, tier badges, and a self-serve forfeit action
+- SSE stream transport for `/sim/towns/{town_id}/events/stream` with auto-fallback to polling
+- Town replay/rewind timeline modal (scrub + play/pause + return-live)
+- Relationship graph modal (top-relationship links + click-node focus)
+- Ambient night firefly particles synced to day/night cycle
+- Expanded scenario spectator scene with dedicated Werewolf/Anaconda boards, replay controls, vote/pot tracker, phase banner, and transcript modal
+- Scenario sprite-sheet normalization pipeline (`scripts/extract_scenario_sheet_assets.py`) now feeds spectator UI from transparent per-sprite assets in `apps/web/assets/scenarios/processed/`
+- Anaconda board now uses dynamic chip denomination icons, rank ribbons, and rendered card-face tokens for revealed cards
+- Revealed Anaconda hands now prefer extracted suit-card face sprites (`processed/anaconda/cards/faces/`) with inline fallback text if an asset fails
 
 ---
 
@@ -726,15 +732,16 @@ Fading trail of recent positions for the selected agent:
 | 7 | Connection status indicator | ✅ Done | 🔴 P0 | S | Spectators need to know the stream is live |
 | 8 | Town card navigation fix | ✅ Done | 🟡 P1 | S | Fixes broken click-through flow |
 | 9 | Day/night visual cycle | ✅ Done | 🟡 P1 | S | Atmospheric polish — the world breathes |
-| 10 | Conversation transcript modal | ⏳ Planned | 🟡 P1 | M | Narrative depth — read the actual dialogue |
+| 10 | Conversation transcript modal | ✅ Done | 🟡 P1 | M | Narrative depth — read the actual dialogue |
 | 11 | Mobile responsive styles | ✅ Done | 🟡 P1 | M | Accessibility for all devices |
-| 12 | Agent detail drawer | ⏳ Planned | 🟡 P1 | L | Deep engagement with individual characters |
-| 13 | Map interaction (locations + sprites) | 🟨 Partial | 🟡 P1 | L | Spatial understanding + discoverability |
-| 14 | Landing page polish | 🟨 Partial | 🟡 P1 | S | First impressions count |
+| 12 | Agent detail drawer | ✅ Done | 🟡 P1 | L | Deep engagement with individual characters |
+| 13 | Map interaction (locations + sprites) | ✅ Done | 🟡 P1 | L | Spatial understanding + discoverability |
+| 14 | Landing page polish | ✅ Done | 🟡 P1 | S | First impressions count |
 | 15 | Zoom UI buttons | ✅ Done | 🟢 P2 | S | Mobile zoom without scroll wheel |
-| 16 | Ambient day/night particles | ⏳ Planned | 🟢 P2 | M | Atmospheric delight |
-| 17 | Relationship graph | ⏳ Planned | 🟢 P2 | L | Social insight visualization |
-| 18 | SSE real-time updates | ⏳ Planned | 🟢 P2 | XL | Architecture-level upgrade |
+| 16 | Ambient day/night particles | ✅ Done | 🟢 P2 | M | Atmospheric delight |
+| 17 | Relationship graph | ✅ Done | 🟢 P2 | L | Social insight visualization |
+| 18 | SSE real-time updates | ✅ Done | 🟢 P2 | XL | Architecture-level upgrade |
+| 19 | Scenario post-match summary + leaderboard badges | ✅ Done | 🟡 P1 | M | Competitive clarity: who won, how ratings changed, and where you rank |
 
 ---
 

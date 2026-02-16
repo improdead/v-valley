@@ -1,0 +1,159 @@
+{
+  "frames": [
+    {
+      "filename": "table_felt",
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "card_back",
+      "frame": {
+        "x": 32,
+        "y": 0,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "chip_stack",
+      "frame": {
+        "x": 64,
+        "y": 0,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "pot_icon",
+      "frame": {
+        "x": 96,
+        "y": 0,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "fold_icon",
+      "frame": {
+        "x": 0,
+        "y": 32,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "all_in_icon",
+      "frame": {
+        "x": 32,
+        "y": 32,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "reveal_eye",
+      "frame": {
+        "x": 64,
+        "y": 32,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "pass_arrow_left",
+      "frame": {
+        "x": 96,
+        "y": 32,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "pass_arrow_right",
+      "frame": {
+        "x": 0,
+        "y": 64,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    },
+    {
+      "filename": "winner_crown",
+      "frame": {
+        "x": 32,
+        "y": 64,
+        "w": 32,
+        "h": 32
+      },
+      "anchor": {
+        "x": 0.5,
+        "y": 0.5
+      }
+    }
+  ],
+  "meta": {
+    "pack": "anaconda",
+    "generator": "scripts/build_scenario_assets.py",
+    "tile_size": 32,
+    "columns": 4,
+    "rows": 3,
+    "palette": [
+      "transparent",
+      "night_0",
+      "night_1",
+      "night_2",
+      "wood",
+      "ember",
+      "fire",
+      "sun",
+      "cyan",
+      "leaf_0",
+      "leaf_1",
+      "leaf_2",
+      "silver",
+      "slate",
+      "white",
+      "ink"
+    ]
+  }
+}

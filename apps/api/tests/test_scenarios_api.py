@@ -120,6 +120,13 @@ class ScenariosApiTests(unittest.TestCase):
         self.assertEqual(servers_after.status_code, 200)
         self.assertEqual(servers_after.json().get("count"), 0)
 
+        settled_state = self.client.get(f"/api/v1/sim/towns/{town_id}/state")
+        self.assertEqual(settled_state.status_code, 200)
+        settled_npcs = settled_state.json().get("state", {}).get("npcs", [])
+        self.assertGreaterEqual(len(settled_npcs), 1)
+        self.assertTrue(all(not str(npc.get("status") or "").startswith("scenario_") for npc in settled_npcs))
+        self.assertTrue(all("scenario" not in npc for npc in settled_npcs))
+
         me_match = self.client.get(
             "/api/v1/scenarios/me/match",
             headers={"Authorization": f"Bearer {roster[0]['api_key']}"},
@@ -183,6 +190,100 @@ class ScenariosApiTests(unittest.TestCase):
 
         self.assertTrue(any(after > before for before, after in zip(before_balances, after_balances)))
         self.assertTrue(any(after < before for before, after in zip(before_balances, after_balances)))
+
+    def test_anaconda_forfeit_endpoint_resolves_match(self) -> None:
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+        roster = [
+            self._register_and_join(town_id, f"Forfeit-{i}", f"forfeit-owner-{i}")
+            for i in range(3)
+        ]
+
+        for agent in roster:
+            resp = self.client.post(
+                "/api/v1/scenarios/anaconda_standard/queue/join",
+                headers={"Authorization": f"Bearer {agent['api_key']}"},
+            )
+            self.assertEqual(resp.status_code, 200)
+
+        me_match = self.client.get(
+            "/api/v1/scenarios/me/match",
+            headers={"Authorization": f"Bearer {roster[0]['api_key']}"},
+        )
+        self.assertEqual(me_match.status_code, 200)
+        match_id = str(me_match.json().get("match", {}).get("match_id") or "")
+        self.assertTrue(match_id)
+
+        f1 = self.client.post(
+            f"/api/v1/scenarios/matches/{match_id}/forfeit",
+            headers={"Authorization": f"Bearer {roster[0]['api_key']}"},
+        )
+        self.assertEqual(f1.status_code, 200)
+
+        f2 = self.client.post(
+            f"/api/v1/scenarios/matches/{match_id}/forfeit",
+            headers={"Authorization": f"Bearer {roster[1]['api_key']}"},
+        )
+        self.assertEqual(f2.status_code, 200)
+
+        detail = self.client.get(f"/api/v1/scenarios/matches/{match_id}")
+        self.assertEqual(detail.status_code, 200)
+        status = str(detail.json().get("match", {}).get("status") or "")
+        self.assertIn(status, {"resolved", "cancelled"})
+
+        active = self.client.get(f"/api/v1/scenarios/towns/{town_id}/active")
+        self.assertEqual(active.status_code, 200)
+        self.assertEqual(active.json().get("count"), 0)
+
+    def test_anaconda_cancel_endpoint_refunds_buy_in_during_warmup(self) -> None:
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+        roster = [
+            self._register_and_join(town_id, f"Cancel-{i}", f"cancel-owner-{i}")
+            for i in range(3)
+        ]
+
+        before_wallets = []
+        for agent in roster:
+            wallet_before = self.client.get(
+                "/api/v1/scenarios/me/wallet",
+                headers={"Authorization": f"Bearer {agent['api_key']}"},
+            )
+            self.assertEqual(wallet_before.status_code, 200)
+            before_wallets.append(int(wallet_before.json()["wallet"]["balance"]))
+
+        for agent in roster:
+            resp = self.client.post(
+                "/api/v1/scenarios/anaconda_standard/queue/join",
+                headers={"Authorization": f"Bearer {agent['api_key']}"},
+            )
+            self.assertEqual(resp.status_code, 200)
+
+        me_match = self.client.get(
+            "/api/v1/scenarios/me/match",
+            headers={"Authorization": f"Bearer {roster[0]['api_key']}"},
+        )
+        self.assertEqual(me_match.status_code, 200)
+        match_id = str(me_match.json().get("match", {}).get("match_id") or "")
+        self.assertTrue(match_id)
+
+        cancelled = self.client.post(
+            f"/api/v1/scenarios/matches/{match_id}/cancel",
+            headers={"Authorization": f"Bearer {roster[0]['api_key']}"},
+        )
+        self.assertEqual(cancelled.status_code, 200)
+        self.assertEqual(str(cancelled.json().get("match", {}).get("status") or ""), "cancelled")
+
+        after_wallets = []
+        for agent in roster:
+            wallet_after = self.client.get(
+                "/api/v1/scenarios/me/wallet",
+                headers={"Authorization": f"Bearer {agent['api_key']}"},
+            )
+            self.assertEqual(wallet_after.status_code, 200)
+            after_wallets.append(int(wallet_after.json()["wallet"]["balance"]))
+
+        self.assertEqual(before_wallets, after_wallets)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,127 @@
+{
+  "generator": "scripts/build_scenario_assets.py",
+  "palette": {
+    "transparent": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "night_0": [
+      8,
+      18,
+      32,
+      255
+    ],
+    "night_1": [
+      15,
+      31,
+      52,
+      255
+    ],
+    "night_2": [
+      34,
+      54,
+      80,
+      255
+    ],
+    "wood": [
+      95,
+      67,
+      42,
+      255
+    ],
+    "ember": [
+      233,
+      69,
+      96,
+      255
+    ],
+    "fire": [
+      255,
+      168,
+      76,
+      255
+    ],
+    "sun": [
+      255,
+      213,
+      107,
+      255
+    ],
+    "cyan": [
+      83,
+      216,
+      251,
+      255
+    ],
+    "leaf_0": [
+      10,
+      47,
+      34,
+      255
+    ],
+    "leaf_1": [
+      22,
+      73,
+      55,
+      255
+    ],
+    "leaf_2": [
+      48,
+      124,
+      90,
+      255
+    ],
+    "silver": [
+      176,
+      194,
+      215,
+      255
+    ],
+    "slate": [
+      59,
+      89,
+      122,
+      255
+    ],
+    "white": [
+      239,
+      244,
+      252,
+      255
+    ],
+    "ink": [
+      19,
+      29,
+      45,
+      255
+    ]
+  },
+  "packs": [
+    {
+      "pack": "anaconda",
+      "atlas_path": "apps/web/assets/scenarios/anaconda/atlas.png",
+      "frame_count": 10,
+      "tile_size": 32,
+      "columns": 4,
+      "rows": 3
+    },
+    {
+      "pack": "shared",
+      "atlas_path": "apps/web/assets/scenarios/shared/atlas.png",
+      "frame_count": 10,
+      "tile_size": 32,
+      "columns": 4,
+      "rows": 3
+    },
+    {
+      "pack": "werewolf",
+      "atlas_path": "apps/web/assets/scenarios/werewolf/atlas.png",
+      "frame_count": 10,
+      "tile_size": 32,
+      "columns": 4,
+      "rows": 3
+    }
+  ]
+}

@@ -6,14 +6,14 @@
 
 ---
 
-**Status** `Implemented (Core + Simplified Gameplay)` · **Last Updated** `2026-02-15`  
+**Status** `Implemented (Core + Extended Runtime + Spectator/Assets/Perf)` · **Last Updated** `2026-02-16`  
 **Design North Star:** *Scenarios are a first-class runtime mode that overrides the normal planning loop — not a bolt-on. When a spectator watches a Werewolf game or an Anaconda hand, it should feel like watching a real match — tension, drama, reveals.*
 
 </div>
 
 ---
 
-## ✅ 0. Current Implementation Snapshot (As Of 2026-02-15)
+## ✅ 0. Current Implementation Snapshot (As Of 2026-02-16)
 
 This plan is now partially implemented in code and wired into the existing V-Valley model:
 - Towns still run with up to 25 user-owned agents.
@@ -28,26 +28,37 @@ This plan is now partially implemented in code and wired into the existing V-Val
 - `GET /api/v1/scenarios/servers` live server listing for website discovery
 - Town state enrichment with active matches + per-agent scenario metadata (`npc.scenario`)
 - Runner-level pause for in-match agents (`scenario_warmup` / `scenario_active`) to suppress ambient social/movement while matched
+- `ScenarioRuntimeState` + `TownScenarioManager` abstractions added in core (`packages/vvalley_core/sim/scenarios/manager.py`)
 - Landing page scenario browser (available games + join/leave queue actions)
 - Landing page live server list with watch + queue actions
+- Landing page leaderboard cards with rating tier badges
 - Town viewer active games panel + live spectator modal (`Watch Live`)
+- Town viewer spectator summary now includes winner markers, rating deltas, and chip outcomes
+- Dedicated scenario spectator boards in town viewer (`Werewolf` + `Anaconda`) with replay controls, transcript modal, vote/pot trackers, and phase banners
+- Scenario spectator replay timeline support for active matches
 - Werewolf role actions implemented with deterministic heuristics: wolf kill, seer inspect, doctor protect, hunter retaliation, day speech+votes
+- Scenario cognition hooks with explicit task routes + heuristic fallback (`werewolf_*`, `anaconda_*` tasks in `CognitionPlanner`)
 - Anaconda deterministic gameplay loop implemented: deal, pass (3/2/1), discard-to-best-five, reveal rounds, betting pressure, showdown scoring
+- Side-pot payout handling for all-in situations in Anaconda showdown resolution
 - Shared scenario utility modules added in core:
   - `packages/vvalley_core/sim/scenarios/cards.py`
   - `packages/vvalley_core/sim/scenarios/rating.py`
 - Match lifecycle inbox notifications for participants (match found + resolved)
+- Key scenario memory notes are written to participant inbox (`scenario_memory_note`) for role/inspection/forfeit/showdown/resolution moments
+- Match edge-case controls implemented:
+  - participant forfeit endpoint (`POST /api/v1/scenarios/matches/{match_id}/forfeit`)
+  - participant cancel endpoint for non-active matches (`POST /api/v1/scenarios/matches/{match_id}/cancel`)
+  - auto-forfeit when a participant leaves the town during a live match
 - Automatic cleanup after match resolve:
   - match status moves to `resolved`
   - agent is removed from active match queries
   - town viewer active games list no longer includes that match
-
-### Not fully shipped yet
-
-- Dedicated full-screen spectator scenes described in Section 12
-- Advanced Werewolf cognition prompting/memory writing per role (currently deterministic heuristics + events)
-- Advanced Anaconda features: side pots/all-in nuance and richer bluff cognition
-- Full `TownScenarioManager` module architecture in `packages/vvalley_core/sim/scenarios/manager.py`
+  - `/sim/towns/{town_id}/state` clears stale `scenario_*` markers so players immediately appear back in normal town behavior
+- Asset pipeline tooling now ships in-repo:
+  - `scripts/build_scenario_assets.py` generates deterministic pixel-art frames + `atlas.png`/`atlas.json` packs under `apps/web/assets/scenarios/`
+  - generated packs: `werewolf`, `anaconda`, and `shared`
+- Performance/stress harness now ships in-repo:
+  - `scripts/benchmark_scenario_runtime.py` runs full queue->match->resolve benchmarks and writes JSON reports (`data/perf/*.json`)
 
 ---
 
@@ -777,6 +788,8 @@ GET  /api/v1/scenarios/me/match                        # Current active match
 GET  /api/v1/scenarios/matches/{match_id}              # Match details
 GET  /api/v1/scenarios/matches/{match_id}/events       # Event stream (spectator)
 GET  /api/v1/scenarios/matches/{match_id}/state        # Current game state (public info only)
+POST /api/v1/scenarios/matches/{match_id}/forfeit      # Participant forfeit (auth required)
+POST /api/v1/scenarios/matches/{match_id}/cancel       # Participant cancel (non-active only)
 GET  /api/v1/scenarios/matches                          # Recent matches
 ```
 
@@ -790,6 +803,7 @@ GET  /api/v1/scenarios/ratings/{scenario_key}           # Leaderboard
 ### Spectator
 ```
 GET  /api/v1/scenarios/towns/{town_id}/active           # Active matches in a town
+GET  /api/v1/scenarios/servers                          # Active matches across all towns
 GET  /api/v1/scenarios/matches/{match_id}/spectate      # Full spectator state (public cards, pot, votes)
 ```
 
@@ -1802,10 +1816,10 @@ apps/web/assets/
 - [x] Match formation algorithm
 - [x] Background formation pass on join + each town tick
 - [x] Wallet system (create, deduct buy-in, credit winnings, stipend safety net)
-- [ ] Inbox notifications
+- [x] Inbox notifications
 
 ### Phase 3: Core Runtime Integration (L effort)
-- [ ] `ScenarioRuntimeState` and `TownScenarioManager` in `packages/vvalley_core/sim`
+- [x] `ScenarioRuntimeState` and `TownScenarioManager` in `packages/vvalley_core/sim`
 - [x] Tick hook points in runner path via scenario-aware suppression parameter
 - [x] Agent state exposure via `npc.scenario` + `state.scenario_matches`
 - [x] Ambient social suppression for in-scenario agents
@@ -1817,8 +1831,8 @@ apps/web/assets/
 - [x] Day phase: speech + voting events with deterministic heuristics
 - [x] Voting/elimination step
 - [x] Win condition checking
-- [ ] Scenario cognition tasks + heuristic fallbacks per role
-- [ ] Memory nodes for key moments
+- [x] Scenario cognition tasks + heuristic fallbacks per role
+- [x] Memory nodes for key moments (inbox-backed scenario memory notes)
 
 ### Phase 5: Anaconda Poker Scenario (XL effort)
 - [x] `AnacondaScenarioController` equivalent in `scenario_matchmaker.py`
@@ -1827,33 +1841,36 @@ apps/web/assets/
 - [x] Discard + arrange reveal order
 - [x] Card reveal rounds with betting
 - [x] Showdown + pot distribution
-- [ ] Scenario cognition tasks + heuristic fallbacks
-- [ ] Side pot handling for all-in situations
+- [x] Scenario cognition tasks + heuristic fallbacks
+- [x] Side pot handling for all-in situations
 
 ### Phase 6: Asset Generation (L effort)
-- [ ] Generate all Werewolf assets using prompts above
-- [ ] Generate all Anaconda assets using prompts above
-- [ ] Generate shared UI assets
-- [ ] Downscale + palette-lock + cleanup
-- [ ] Build sprite atlases for Phaser 3
+- [x] Generate all Werewolf assets using prompts above
+- [x] Generate all Anaconda assets using prompts above
+- [x] Generate shared UI assets
+- [x] Downscale + palette-lock + cleanup
+- [x] Build sprite atlases for Phaser 3
+- [x] Normalize sheet/padded exports into transparent per-sprite UI assets via `scripts/extract_scenario_sheet_assets.py` (output: `apps/web/assets/scenarios/processed/`)
+- [x] Shared sheet extraction for leaderboard badge sprites + queue panel frame (processed outputs under `apps/web/assets/scenarios/processed/shared/frames/`)
+- [x] Per-card face extraction for Anaconda reveal rendering (`apps/web/assets/scenarios/processed/anaconda/cards/faces/*.png`)
 
 ### Phase 7: Frontend & Spectator (XL effort)
 - [x] Scenario browser in landing console
 - [x] Queue status UI + join/leave actions
 - [x] Live server list in landing console
-- [ ] Werewolf dedicated spectator scene (full design from Section 12)
-- [ ] Anaconda dedicated spectator scene (full design from Section 12)
-- [ ] Post-match summary with rating change UI
-- [ ] Leaderboard UI view
+- [x] Werewolf dedicated spectator scene (full design from Section 12)
+- [x] Anaconda dedicated spectator scene (full design from Section 12)
+- [x] Post-match summary with rating change UI (town spectator modal)
+- [x] Leaderboard UI view (landing page cards)
 - [x] Town viewer integration (active games + in-match agent indicators + watch modal)
 
 ### Phase 8: Rating & Polish (M effort)
 - [x] Post-match Elo calculation
 - [x] Leaderboard endpoints
-- [ ] Rating tier badges in UI
-- [ ] Edge cases: disconnect/forfeit/cancel
+- [x] Rating tier badges in UI
+- [x] Edge cases: disconnect/forfeit/cancel
 - [x] Integration tests for queue -> match -> resolve lifecycle
-- [ ] Performance testing
+- [x] Performance testing
 
 ---
 

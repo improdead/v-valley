@@ -306,6 +306,23 @@
       color: var(--text-muted);
       margin-top: 4px;
     }
+    .convo-actions {
+      margin-top: 8px;
+      display: flex;
+      justify-content: flex-end;
+    }
+    .convo-detail-btn {
+      border: 1px solid var(--border-color);
+      background: #1a3350;
+      color: var(--accent-purple);
+      font-size: 12px;
+      padding: 2px 8px;
+      cursor: pointer;
+    }
+    .convo-detail-btn:hover {
+      border-color: var(--accent-purple);
+      color: #e7dcff;
+    }
 
     .agent-scenario-badge {
       display: inline-flex;
@@ -454,13 +471,14 @@
       padding: 16px;
     }
     .match-modal-card {
-      width: min(920px, 96vw);
-      max-height: 88vh;
+      width: min(1200px, 98vw);
+      max-height: 92vh;
       overflow: hidden;
       border: var(--pixel-border);
       background: linear-gradient(180deg, var(--bg-panel) 0%, #111d30 100%);
       display: grid;
       grid-template-rows: auto auto 1fr;
+      position: relative;
     }
     .match-modal-head {
       display: flex;
@@ -473,6 +491,11 @@
       font-size: 0.42rem;
       color: var(--accent-gold);
     }
+    .match-modal-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
     .match-modal-head button {
       border: 1px solid var(--border-color);
       background: var(--bg-card);
@@ -481,15 +504,40 @@
       padding: 2px 8px;
       cursor: pointer;
     }
+    .match-modal-head button:hover {
+      border-color: var(--accent-gold);
+      color: var(--accent-gold);
+    }
     .match-modal-phase {
       border-bottom: 2px dashed var(--border-color);
       padding: 8px 12px;
       color: var(--text-dim);
       font-size: 14px;
     }
+    .match-scene-banner {
+      position: absolute;
+      left: 50%;
+      top: 64px;
+      transform: translateX(-50%) translateY(-8px);
+      background: rgba(9, 19, 34, 0.92);
+      border: 2px solid var(--accent-gold);
+      color: var(--accent-gold);
+      font-family: var(--font-pixel);
+      font-size: 0.38rem;
+      padding: 6px 10px;
+      z-index: 4;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+      box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.4);
+    }
+    .match-scene-banner.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
     .match-modal-grid {
       display: grid;
-      grid-template-columns: 1fr 1.5fr;
+      grid-template-columns: minmax(280px, 340px) 1fr;
       gap: 0;
       min-height: 0;
     }
@@ -501,6 +549,87 @@
     }
     .match-modal-panel:last-child {
       border-right: none;
+    }
+    .match-modal-panel h3 {
+      font-family: var(--font-pixel);
+      font-size: 0.36rem;
+      color: var(--accent-cyan);
+      margin: 0 0 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    .match-modal-main {
+      display: grid;
+      grid-template-rows: minmax(250px, 38vh) auto 1fr;
+      gap: 8px;
+      overflow: hidden;
+    }
+    .match-modal-main #matchModalEvents {
+      min-height: 0;
+      overflow: auto;
+      border: 1px solid var(--border-color);
+      background: rgba(10, 18, 32, 0.5);
+      padding: 6px 8px;
+    }
+    .match-modal-board {
+      border: 2px solid var(--border-color);
+      background: #081321;
+      position: relative;
+      min-height: 220px;
+      overflow: hidden;
+    }
+    .match-vote-tracker {
+      border: 1px solid var(--border-color);
+      background: rgba(10, 18, 32, 0.5);
+      padding: 8px;
+      display: grid;
+      gap: 4px;
+      margin-bottom: 10px;
+    }
+    .match-vote-row {
+      font-size: 14px;
+      color: var(--text-dim);
+      border-bottom: 1px dotted rgba(255, 255, 255, 0.08);
+      padding-bottom: 3px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .match-vote-row:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+    .match-vote-icon {
+      width: 18px;
+      height: 18px;
+      object-fit: contain;
+      image-rendering: pixelated;
+    }
+    .match-replay-controls {
+      display: none;
+      gap: 6px;
+      border: 1px solid var(--border-color);
+      background: rgba(10, 18, 32, 0.5);
+      padding: 8px;
+      margin-top: 6px;
+      align-items: center;
+      grid-template-columns: auto 1fr auto;
+    }
+    .match-replay-controls button {
+      border: 1px solid var(--border-color);
+      background: #1a3350;
+      color: var(--text);
+      font-size: 12px;
+      padding: 2px 8px;
+      cursor: pointer;
+    }
+    .match-replay-controls input[type="range"] {
+      width: 100%;
+    }
+    .match-replay-label {
+      grid-column: 1 / span 2;
+      font-size: 12px;
+      color: var(--text-muted);
     }
     .match-player-row {
       font-size: 14px;
@@ -514,6 +643,573 @@
       padding: 3px 0;
       border-bottom: 1px dotted rgba(255,255,255,0.08);
       word-break: break-word;
+    }
+    .scenario-board {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+    .werewolf-board {
+      background: radial-gradient(circle at 50% 58%, #2a1a1a 0%, #101a2d 56%, #081220 100%);
+    }
+    .ww-overlay {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(180deg, rgba(28, 47, 80, 0.45) 0%, rgba(9, 15, 25, 0.7) 100%);
+    }
+    .ww-campfire {
+      position: absolute;
+      left: 50%;
+      top: 52%;
+      transform: translate(-50%, -50%);
+      filter: drop-shadow(0 0 10px rgba(255, 170, 85, 0.6));
+      animation: campfireFlicker 1.2s ease-in-out infinite;
+      z-index: 2;
+    }
+    .ww-campfire img {
+      width: 132px;
+      height: 132px;
+      object-fit: contain;
+      image-rendering: pixelated;
+    }
+    .ww-phase-art {
+      position: absolute;
+      top: 4px;
+      left: 8px;
+      width: 44px;
+      height: 44px;
+      object-fit: contain;
+      z-index: 2;
+      opacity: 0.8;
+      image-rendering: pixelated;
+    }
+    .ww-mode-icon {
+      position: absolute;
+      top: 6px;
+      right: 8px;
+      width: 38px;
+      height: 38px;
+      object-fit: contain;
+      z-index: 2;
+      opacity: 0.9;
+      image-rendering: pixelated;
+    }
+    .ww-phase {
+      position: absolute;
+      top: 8px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-family: var(--font-pixel);
+      font-size: 0.35rem;
+      color: var(--accent-gold);
+      letter-spacing: 0.03em;
+      z-index: 2;
+      text-shadow: 0 0 10px rgba(255, 213, 107, 0.3);
+    }
+    .ww-seat {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      width: 106px;
+      border: 1px solid var(--border-color);
+      background: rgba(9, 19, 34, 0.86);
+      padding: 4px;
+      text-align: center;
+      z-index: 3;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+    }
+    .ww-seat.eliminated {
+      opacity: 0.45;
+      filter: grayscale(0.8);
+    }
+    .ww-avatar {
+      font-family: var(--font-pixel);
+      font-size: 0.48rem;
+      color: var(--accent-cyan);
+      margin-bottom: 2px;
+    }
+    .ww-name {
+      font-size: 12px;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .ww-role {
+      font-size: 11px;
+      color: var(--accent-gold);
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      margin-top: 2px;
+    }
+    .ww-role-wrap {
+      margin-top: 3px;
+      min-height: 62px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    .ww-role-card {
+      width: 40px;
+      height: 58px;
+      object-fit: contain;
+      border: 1px solid rgba(255, 213, 107, 0.35);
+      border-radius: 3px;
+      background: rgba(8, 18, 32, 0.72);
+      image-rendering: pixelated;
+    }
+    .ww-votes {
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-top: 1px;
+    }
+    .ww-tombstone {
+      width: 28px;
+      height: 40px;
+      object-fit: contain;
+      margin-top: 2px;
+      opacity: 0.95;
+      filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.2));
+      image-rendering: pixelated;
+    }
+    .anaconda-board {
+      background: radial-gradient(circle at 50% 50%, #1d3b2f 0%, #123127 48%, #0a1f19 100%);
+    }
+    .ana-table-art {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: min(78%, 430px);
+      height: min(76%, 390px);
+      transform: translate(-50%, -50%);
+      object-fit: contain;
+      z-index: 1;
+      opacity: 0.88;
+      image-rendering: pixelated;
+    }
+    .ana-table {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 52%;
+      height: 44%;
+      transform: translate(-50%, -50%);
+      border-radius: 999px;
+      border: 3px solid rgba(255, 213, 107, 0.5);
+      box-shadow: inset 0 0 30px rgba(0, 0, 0, 0.35);
+      background: rgba(10, 44, 31, 0.7);
+      z-index: 0;
+    }
+    .ana-phase-art {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      width: 92px;
+      height: 38px;
+      object-fit: contain;
+      z-index: 2;
+      opacity: 0.85;
+      image-rendering: pixelated;
+    }
+    .ana-ranks-art {
+      position: absolute;
+      left: 8px;
+      bottom: 8px;
+      width: 124px;
+      height: 18px;
+      object-fit: contain;
+      z-index: 2;
+      opacity: 0.88;
+      image-rendering: pixelated;
+    }
+    .ana-pot {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(9, 19, 34, 0.9);
+      border: 1px solid var(--accent-gold);
+      color: var(--accent-gold);
+      font-family: var(--font-pixel);
+      font-size: 0.34rem;
+      padding: 4px 6px;
+      z-index: 2;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .ana-pot img {
+      width: 20px;
+      height: 20px;
+      image-rendering: pixelated;
+    }
+    .ana-phase {
+      position: absolute;
+      top: 8px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-family: var(--font-pixel);
+      font-size: 0.34rem;
+      color: var(--accent-cyan);
+      z-index: 2;
+    }
+    .ana-seat {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      width: 114px;
+      border: 1px solid var(--border-color);
+      background: rgba(9, 19, 34, 0.88);
+      padding: 4px;
+      text-align: center;
+      z-index: 3;
+      transition: opacity 0.2s ease;
+    }
+    .ana-seat.folded {
+      opacity: 0.4;
+      filter: grayscale(0.8);
+    }
+    .ana-name {
+      font-size: 12px;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .ana-cards {
+      font-size: 12px;
+      color: #f6efe0;
+      margin-top: 2px;
+      min-height: 24px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      text-shadow: 0 1px 0 rgba(0, 0, 0, 0.45);
+    }
+    .ana-revealed-cards {
+      display: inline-flex;
+      gap: 2px;
+      align-items: center;
+      justify-content: center;
+      flex-wrap: nowrap;
+    }
+    .ana-card-face-wrap {
+      display: inline-flex;
+      width: 14px;
+      height: 20px;
+      align-items: center;
+      justify-content: center;
+    }
+    .ana-card-face-image {
+      width: 14px;
+      height: 20px;
+      object-fit: contain;
+      image-rendering: pixelated;
+    }
+    .ana-card-face {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 16px;
+      height: 20px;
+      border: 1px solid rgba(19, 35, 41, 0.55);
+      border-radius: 2px;
+      background: #f8f0df;
+      color: #24354a;
+      font-family: var(--font-pixel);
+      font-size: 10px;
+      line-height: 1;
+      padding: 0 2px;
+      text-shadow: none;
+      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.2);
+    }
+    .ana-suit-heart,
+    .ana-suit-diamond {
+      color: #b33a40;
+    }
+    .ana-suit-spade,
+    .ana-suit-club {
+      color: #1e3554;
+    }
+    .ana-suit-unknown {
+      color: #69778d;
+    }
+    .ana-hidden-cards {
+      display: inline-flex;
+      gap: 2px;
+      align-items: center;
+    }
+    .ana-card-back {
+      width: 14px;
+      height: 20px;
+      object-fit: contain;
+      image-rendering: pixelated;
+    }
+    .ana-chips {
+      font-size: 11px;
+      color: var(--accent-gold);
+      margin-top: 1px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+    }
+    .ana-chip-icon {
+      width: 16px;
+      height: 16px;
+      object-fit: contain;
+      image-rendering: pixelated;
+    }
+    @keyframes campfireFlicker {
+      0%, 100% { transform: translate(-50%, -50%) scale(1); }
+      50% { transform: translate(-50%, -50%) scale(1.05); }
+    }
+
+    /* ── Conversation modal ── */
+    .convo-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(5, 10, 18, 0.78);
+      z-index: 320;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .convo-modal-card {
+      width: min(860px, 95vw);
+      max-height: 88vh;
+      overflow: hidden;
+      border: var(--pixel-border);
+      background: linear-gradient(180deg, var(--bg-panel) 0%, #111d30 100%);
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+    }
+    .convo-modal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border-bottom: 2px solid var(--border-color);
+      padding: 10px 12px;
+      font-family: var(--font-pixel);
+      font-size: 0.4rem;
+      color: var(--accent-purple);
+    }
+    .convo-modal-head button {
+      border: 1px solid var(--border-color);
+      background: var(--bg-card);
+      color: var(--text);
+      font-size: 13px;
+      padding: 2px 8px;
+      cursor: pointer;
+    }
+    .convo-modal-meta {
+      border-bottom: 2px dashed var(--border-color);
+      padding: 8px 12px;
+      color: var(--text-dim);
+      font-size: 14px;
+    }
+    .convo-modal-body {
+      padding: 10px 12px;
+      overflow: auto;
+      min-height: 0;
+      border-left: 3px solid var(--accent-purple);
+    }
+    .convo-line {
+      border-bottom: 1px dotted rgba(255,255,255,0.1);
+      padding: 6px 0;
+    }
+    .convo-line:last-child {
+      border-bottom: none;
+    }
+    .convo-line-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--accent-cyan);
+      font-size: 12px;
+      margin-bottom: 3px;
+    }
+    .convo-line-text {
+      color: var(--text);
+      font-size: 15px;
+      line-height: 1.35;
+      word-break: break-word;
+    }
+    .convo-modal-foot {
+      border-top: 1px solid var(--border-color);
+      padding: 8px 12px;
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .convo-modal-foot button {
+      border: 1px solid var(--border-color);
+      background: #1a3350;
+      color: var(--accent-purple);
+      font-size: 12px;
+      padding: 3px 10px;
+      cursor: pointer;
+    }
+    .convo-modal-foot button:hover {
+      border-color: var(--accent-purple);
+      color: #e7dcff;
+    }
+    .replay-modal-card {
+      width: min(760px, 96vw);
+      grid-template-rows: auto auto auto;
+    }
+    .replay-controls {
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+    .replay-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+    .replay-actions button {
+      border: 1px solid var(--border-color);
+      background: #1a3350;
+      color: var(--text);
+      font-size: 12px;
+      padding: 3px 10px;
+      cursor: pointer;
+    }
+    .relation-modal-card {
+      width: min(980px, 96vw);
+      max-height: 88vh;
+      overflow: hidden;
+      border: var(--pixel-border);
+      background: linear-gradient(180deg, var(--bg-panel) 0%, #111d30 100%);
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+    .relation-modal-body {
+      padding: 10px;
+      min-height: 0;
+    }
+    #relationCanvas {
+      width: 100%;
+      height: min(62vh, 520px);
+      border: 2px solid var(--border-color);
+      display: block;
+      background: #0d1a2c;
+    }
+
+    /* ── Location interaction ── */
+    .location-tooltip {
+      position: absolute;
+      display: none;
+      pointer-events: none;
+      background: rgba(9, 19, 34, 0.95);
+      border: 1px solid var(--border-color);
+      color: var(--accent-gold);
+      font-size: 12px;
+      padding: 3px 8px;
+      z-index: 45;
+      box-shadow: 2px 2px 0 rgba(0,0,0,0.35);
+      max-width: 260px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .location-panel {
+      display: none;
+      position: absolute;
+      left: 10px;
+      bottom: 10px;
+      width: min(350px, calc(100% - 20px));
+      max-height: 48%;
+      overflow: auto;
+      border: var(--pixel-border);
+      background: linear-gradient(180deg, var(--bg-panel) 0%, #111d30 100%);
+      z-index: 45;
+      box-shadow: 5px 5px 0 rgba(0,0,0,0.4);
+    }
+    .location-panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      border-bottom: 2px solid var(--border-color);
+      padding: 8px 10px;
+      font-family: var(--font-pixel);
+      font-size: 0.36rem;
+      color: var(--accent-gold);
+      letter-spacing: 0.02em;
+    }
+    .location-panel-head button {
+      border: 1px solid var(--border-color);
+      background: var(--bg-card);
+      color: var(--text);
+      font-size: 12px;
+      padding: 1px 8px;
+      cursor: pointer;
+    }
+    .location-panel-body {
+      padding: 10px;
+      font-size: 14px;
+      color: var(--text);
+    }
+    .location-agent-row {
+      padding: 4px 0;
+      border-bottom: 1px dotted rgba(255,255,255,0.1);
+    }
+    .location-agent-row:last-child {
+      border-bottom: none;
+    }
+
+    /* ── Agent drawer ── */
+    .agent-drawer {
+      display: none;
+      position: fixed;
+      top: 56px;
+      left: 12px;
+      width: min(340px, 92vw);
+      max-height: calc(100vh - 72px);
+      overflow: auto;
+      border: var(--pixel-border);
+      background: linear-gradient(180deg, var(--bg-panel) 0%, #111d30 100%);
+      z-index: 220;
+      box-shadow: 5px 5px 0 rgba(0,0,0,0.4);
+    }
+    .agent-drawer-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border-bottom: 2px solid var(--border-color);
+      padding: 8px 10px;
+      font-family: var(--font-pixel);
+      font-size: 0.4rem;
+      color: var(--accent-cyan);
+    }
+    .agent-drawer-head button {
+      border: 1px solid var(--border-color);
+      background: var(--bg-card);
+      color: var(--text);
+      font-size: 12px;
+      padding: 2px 8px;
+      cursor: pointer;
+    }
+    .agent-drawer-body {
+      padding: 10px;
+      font-size: 14px;
+      color: var(--text);
+      line-height: 1.35;
+    }
+    .agent-drawer-row {
+      padding: 4px 0;
+      border-bottom: 1px dotted rgba(255,255,255,0.1);
+    }
+    .agent-drawer-row:last-child {
+      border-bottom: none;
+    }
+    .agent-drawer-label {
+      color: var(--text-muted);
+      margin-right: 6px;
     }
 
     /* ── Empty state ── */
@@ -609,6 +1305,24 @@
       .match-modal-panel:last-child {
         border-bottom: none;
       }
+      .match-modal-actions {
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+      .match-modal-main {
+        grid-template-rows: minmax(200px, 30vh) auto 1fr;
+      }
+      .ww-seat, .ana-seat {
+        width: 96px;
+      }
+      #relationCanvas {
+        height: min(52vh, 360px);
+      }
+      .agent-drawer {
+        left: 8px;
+        top: 102px;
+        width: calc(100vw - 16px);
+      }
     }
   </style>
 </head>
@@ -626,6 +1340,8 @@
     <div class="spacer"></div>
     <button id="btnTick" title="Advance 1 simulation step">Tick</button>
     <button id="btnAutoTick" title="Auto-tick every few seconds">Auto</button>
+    <button id="btnReplay" title="Replay recent town timeline">Replay</button>
+    <button id="btnRelations" title="Open relationship graph">Relations</button>
     <select id="tickScope">
       <option value="short_action">Short Action</option>
       <option value="daily_plan">Daily Plan</option>
@@ -645,6 +1361,14 @@
   <div class="main-layout">
     <div id="game-container">
       <div id="loading-overlay">Select a town to begin</div>
+      <div id="locationTooltip" class="location-tooltip"></div>
+      <aside id="locationPanel" class="location-panel">
+        <div class="location-panel-head">
+          <span id="locationPanelTitle">Location</span>
+          <button id="locationPanelClose">Close</button>
+        </div>
+        <div id="locationPanelBody" class="location-panel-body"></div>
+      </aside>
       <div class="zoom-controls">
         <button id="zoomIn" title="Zoom in">+</button>
         <button id="zoomOut" title="Zoom out">−</button>
@@ -694,21 +1418,103 @@
     <div class="match-modal-card">
       <div class="match-modal-head">
         <span id="matchModalTitle">Match</span>
-        <button id="matchModalClose">Close</button>
+        <div class="match-modal-actions">
+          <button id="matchRolesToggle">Roles: Hidden</button>
+          <button id="matchReplayToggle">Replay</button>
+          <button id="matchTranscriptBtn">Transcript</button>
+          <button id="matchModalClose">Close</button>
+        </div>
       </div>
       <div class="match-modal-phase" id="matchModalPhase">Loading...</div>
+      <div class="match-scene-banner" id="matchSceneBanner"></div>
       <div class="match-modal-grid">
         <div class="match-modal-panel">
           <h3>Participants</h3>
           <div id="matchModalPlayers"></div>
+          <h3>Tracker</h3>
+          <div class="match-vote-tracker" id="matchVoteTracker"></div>
+          <div class="match-replay-controls" id="matchReplayControls">
+            <button id="matchReplayPlay">Play</button>
+            <input id="matchReplaySlider" type="range" min="0" max="0" value="0" />
+            <button id="matchReplayLive">Live</button>
+            <span class="match-replay-label" id="matchReplayLabel">Replay 1/1</span>
+          </div>
         </div>
-        <div class="match-modal-panel">
+        <div class="match-modal-panel match-modal-main">
+          <div class="match-modal-board" id="matchModalBoard">
+            <div class="empty-state"><p>Waiting for match events...</p></div>
+          </div>
           <h3>Events</h3>
           <div id="matchModalEvents"></div>
         </div>
       </div>
     </div>
   </div>
+
+  <div class="convo-modal" id="matchTranscriptModal">
+    <div class="convo-modal-card">
+      <div class="convo-modal-head">
+        <span>Match Transcript</span>
+        <button id="matchTranscriptClose">Close</button>
+      </div>
+      <div class="convo-modal-body" id="matchTranscriptBody">
+        <div class="empty-state"><p>No transcript yet</p></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="convo-modal" id="convoModal">
+    <div class="convo-modal-card">
+      <div class="convo-modal-head">
+        <span id="convoModalTitle">Conversation</span>
+        <button id="convoModalClose">Close</button>
+      </div>
+      <div class="convo-modal-meta" id="convoModalMeta">Loading...</div>
+      <div class="convo-modal-body" id="convoModalBody">
+        <div class="empty-state"><p>No transcript yet</p></div>
+      </div>
+      <div class="convo-modal-foot">
+        <button id="convoModalJump">Jump To Agents</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="convo-modal" id="replayModal">
+    <div class="convo-modal-card replay-modal-card">
+      <div class="convo-modal-head">
+        <span>Town Replay</span>
+        <button id="replayModalClose">Close</button>
+      </div>
+      <div class="convo-modal-meta" id="replayMeta">No snapshots captured yet.</div>
+      <div class="replay-controls">
+        <input id="replaySlider" type="range" min="0" max="0" value="0" />
+        <div class="replay-actions">
+          <button id="replayPlay">Play</button>
+          <button id="replayLive">Back To Live</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="convo-modal" id="relationModal">
+    <div class="relation-modal-card">
+      <div class="convo-modal-head">
+        <span>Relationship Graph</span>
+        <button id="relationModalClose">Close</button>
+      </div>
+      <div class="relation-modal-body">
+        <canvas id="relationCanvas"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <aside class="agent-drawer" id="agentDrawer">
+    <div class="agent-drawer-head">
+      <span id="agentDrawerTitle">Agent</span>
+      <button id="agentDrawerClose">Close</button>
+    </div>
+    <div class="agent-drawer-body" id="agentDrawerBody"></div>
+  </aside>
 
   <script>
     // Preserve ?api= param across navigation

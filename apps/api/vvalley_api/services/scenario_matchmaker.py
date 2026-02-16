@@ -13,6 +13,7 @@ from packages.vvalley_core.sim.scenarios.cards import (
     hand_category_label,
     make_shuffled_deck,
 )
+from packages.vvalley_core.sim.scenarios.manager import TownScenarioManager
 from packages.vvalley_core.sim.scenarios.rating import compute_pairwise_elo_updates
 
 from ..storage.agents import list_active_agents_in_town
@@ -263,6 +264,91 @@ def _notify_match_resolved(
         )
 
 
+def _record_scenario_memory(
+    *,
+    agent_id: str,
+    match_id: str,
+    kind: str,
+    summary: str,
+    payload: dict[str, Any] | None = None,
+    dedupe_suffix: str | None = None,
+) -> None:
+    dedupe = f"scenario_memory:{match_id}:{agent_id}:{kind}:{dedupe_suffix or ''}"
+    create_inbox_item(
+        agent_id=str(agent_id),
+        kind="scenario_memory_note",
+        summary=str(summary)[:240],
+        payload={
+            "match_id": str(match_id),
+            "kind": str(kind),
+            **(payload or {}),
+        },
+        dedupe_key=dedupe,
+    )
+
+
+def _planner_call(planner: Any, method_name: str, context: dict[str, Any]) -> dict[str, Any] | None:
+    if planner is None or not hasattr(planner, method_name):
+        return None
+    try:
+        result = getattr(planner, method_name)(context)
+    except Exception:
+        return None
+    if not isinstance(result, dict):
+        return None
+    return result
+
+
+def _status_is_active_participant(status: str | None) -> bool:
+    value = str(status or "").strip().lower()
+    return value not in {"done", "eliminated", "forfeit", "cancelled"}
+
+
+def _anaconda_resolve_side_pots(
+    *,
+    contributions: dict[str, int],
+    score_map: dict[str, tuple[int, tuple[int, ...]]],
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
+    remaining = {
+        str(aid): max(0, int(value))
+        for aid, value in contributions.items()
+        if str(aid) and int(value) > 0
+    }
+    payouts: dict[str, int] = {aid: 0 for aid in contributions}
+    side_pots: list[dict[str, Any]] = []
+
+    while True:
+        positive = [value for value in remaining.values() if value > 0]
+        if not positive:
+            break
+        level = min(positive)
+        contributors = sorted([aid for aid, value in remaining.items() if value > 0])
+        pot_value = int(level) * len(contributors)
+        eligible = [aid for aid in contributors if aid in score_map]
+        if not eligible:
+            eligible = sorted(score_map.keys())
+        if not eligible:
+            break
+        best = max(score_map[aid] for aid in eligible)
+        winners = sorted([aid for aid in eligible if score_map.get(aid) == best])
+        each = pot_value // max(1, len(winners))
+        remainder = pot_value - (each * len(winners))
+        for idx, aid in enumerate(winners):
+            payouts[aid] = int(payouts.get(aid, 0)) + each + (1 if idx < remainder else 0)
+        side_pots.append(
+            {
+                "amount": int(pot_value),
+                "contributors": contributors,
+                "eligible": eligible,
+                "winners": winners,
+            }
+        )
+        for aid in contributors:
+            remaining[aid] = max(0, int(remaining.get(aid, 0)) - int(level))
+
+    return payouts, side_pots
+
+
 def get_town_agent_scenario_statuses(*, town_id: str) -> dict[str, str]:
     """Return agent->status markers used to pause normal sim behavior during matches."""
     out: dict[str, str] = {}
@@ -274,6 +360,9 @@ def get_town_agent_scenario_statuses(*, town_id: str) -> dict[str, str]:
         participants = scenario_store.list_match_participants(match_id=str(match.get("match_id") or ""))
         for participant in participants:
             aid = str(participant.get("agent_id") or "").strip()
+            pstatus = str(participant.get("status") or "").strip().lower()
+            if pstatus in {"forfeit", "cancelled", "done"}:
+                continue
             if aid:
                 out[aid] = scenario_status
     return out
@@ -289,7 +378,7 @@ def _alive_ids_from_state(*, state: dict[str, Any], participants: list[dict[str,
         if not aid:
             continue
         status = str(item.get("status") or "").strip().lower()
-        if status not in {"eliminated", "done"}:
+        if status not in {"eliminated", "done", "forfeit", "cancelled", "folded"}:
             out.append(aid)
     return out
 
@@ -347,7 +436,8 @@ def _anaconda_active_ids(state: dict[str, Any], participants: list[dict[str, Any
     out: list[str] = []
     for item in participants:
         aid = str(item.get("agent_id") or "")
-        if aid and aid not in folded:
+        status = str(item.get("status") or "").strip().lower()
+        if aid and aid not in folded and status not in {"folded", "forfeit"} and _status_is_active_participant(status):
             out.append(aid)
     return out
 
@@ -370,34 +460,81 @@ def _anaconda_remove_cards(hand: list[str], cards: list[str]) -> list[str]:
 
 def _anaconda_apply_bets(
     *,
+    match_id: str,
     state: dict[str, Any],
     participants: list[dict[str, Any]],
     phase: str,
     current_step: int,
+    cognition_planner: Any = None,
 ) -> dict[str, Any]:
     chips = {str(k): int(v) for k, v in (state.get("chips") or {}).items() if str(k)}
     folded = {str(aid) for aid in (state.get("folded_agent_ids") or []) if str(aid)}
+    all_in = {str(aid) for aid in (state.get("all_in_agent_ids") or []) if str(aid)}
+    contributions = {
+        str(k): int(v)
+        for k, v in (state.get("contributions") or {}).items()
+        if str(k)
+    }
     revealed = state.get("revealed_cards") or {}
     pot = int(state.get("pot") or 0)
     per_agent_bets: dict[str, int] = {}
     new_folds: list[str] = []
+    new_all_in: list[str] = []
 
     for item in participants:
         aid = str(item.get("agent_id") or "")
         if not aid or aid in folded:
             continue
+        if aid in all_in:
+            per_agent_bets[aid] = 0
+            continue
         chips.setdefault(aid, 0)
+        contributions.setdefault(aid, 0)
         visible = len(revealed.get(aid) or [])
         stack = int(chips.get(aid) or 0)
         if stack <= 0:
-            folded.add(aid)
-            new_folds.append(aid)
+            all_in.add(aid)
+            new_all_in.append(aid)
+            per_agent_bets[aid] = 0
             continue
 
         rng = _rng(f"bet:{phase}:{aid}:{current_step}")
         base = 2 + visible * 2
         volatility = rng.randint(0, 6)
         bet = min(stack, max(0, base + volatility))
+
+        planner_decision = _planner_call(
+            cognition_planner,
+            "anaconda_choose_bet",
+            {
+                "town_id": str(state.get("town_id") or ""),
+                "agent_id": aid,
+                "match_id": str(match_id),
+                "phase": str(phase),
+                "step": int(current_step),
+                "stack": int(stack),
+                "visible_cards": int(visible),
+                "pot": int(pot),
+                "folded_agent_ids": sorted(folded),
+                "all_in_agent_ids": sorted(all_in),
+                "revealed_cards": revealed,
+            },
+        )
+        if planner_decision:
+            planner_fold = bool(planner_decision.get("fold"))
+            if planner_fold:
+                folded.add(aid)
+                new_folds.append(aid)
+                per_agent_bets[aid] = 0
+                continue
+            try:
+                planned_bet = int(planner_decision.get("bet") or bet)
+            except Exception:
+                planned_bet = bet
+            if bool(planner_decision.get("all_in")):
+                bet = stack
+            else:
+                bet = min(stack, max(0, planned_bet))
 
         # Folding pressure rises after multiple reveal rounds with short stack.
         if visible >= 3 and stack <= max(6, bet) and rng.randint(0, 99) < 35:
@@ -408,14 +545,27 @@ def _anaconda_apply_bets(
 
         chips[aid] = max(0, stack - bet)
         pot += bet
+        contributions[aid] = int(contributions.get(aid, 0)) + int(bet)
         per_agent_bets[aid] = bet
+        if chips[aid] <= 0 and aid not in all_in:
+            all_in.add(aid)
+            new_all_in.append(aid)
+            scenario_store.update_match_participant(
+                match_id=str(match_id),
+                agent_id=aid,
+                updates={"status": "all_in"},
+            )
 
     state["chips"] = chips
     state["pot"] = pot
+    state["contributions"] = contributions
     state["folded_agent_ids"] = sorted(folded)
+    state["all_in_agent_ids"] = sorted(all_in)
     return {
         "bets": per_agent_bets,
         "folded": new_folds,
+        "all_in": new_all_in,
+        "contributions": contributions,
         "pot": pot,
     }
 
@@ -492,16 +642,19 @@ def form_matches(*, town_id: str, scenario_key: str | None = None, current_step:
                 "phase_sequence": _phase_sequence(scenario),
                 "phase_index": 0,
                 "buy_in": buy_in,
-                "pot": buy_in * len(agent_ids),
+                "pot": 0,
                 "chips": {aid: int(buy_in) for aid in agent_ids},
+                "contributions": {aid: 0 for aid in agent_ids},
                 "seat_order": list(agent_ids),
                 "deck": [],
                 "hands": {},
                 "arranged_hands": {},
                 "revealed_cards": {aid: [] for aid in agent_ids},
                 "folded_agent_ids": [],
+                "all_in_agent_ids": [],
                 "showdown": {},
                 "seed": f"{key}:{','.join(sorted(agent_ids))}",
+                "town_id": str(town_id),
             }
 
         match = scenario_store.create_match(
@@ -565,6 +718,27 @@ def form_matches(*, town_id: str, scenario_key: str | None = None, current_step:
             participants=agent_ids,
             current_step=int(current_step),
         )
+        if "werewolf" in key_lower:
+            for aid in agent_ids:
+                role = str(role_map.get(aid) or "villager")
+                _record_scenario_memory(
+                    agent_id=aid,
+                    match_id=str(match["match_id"]),
+                    kind="werewolf_role_assignment",
+                    summary=f"You are assigned role: {role}.",
+                    payload={"role": role, "scenario_key": key},
+                    dedupe_suffix="role",
+                )
+        elif buy_in > 0:
+            for aid in agent_ids:
+                _record_scenario_memory(
+                    agent_id=aid,
+                    match_id=str(match["match_id"]),
+                    kind="anaconda_buy_in",
+                    summary=f"Joined {key} with {buy_in} chips.",
+                    payload={"buy_in": int(buy_in), "scenario_key": key},
+                    dedupe_suffix="buyin",
+                )
         formed.append(match)
 
     return formed
@@ -712,10 +886,35 @@ def _finalize_match(
         participants=participants,
         result_json=result_json,
     )
+    scenario_name = _scenario_display_name(scenario)
+    for item in participants:
+        aid = str(item.get("agent_id") or "")
+        if not aid:
+            continue
+        won = aid in winner_set
+        _record_scenario_memory(
+            agent_id=aid,
+            match_id=str(match.get("match_id") or ""),
+            kind="match_summary",
+            summary=f"{scenario_name}: {'victory' if won else 'result'} ({reason})",
+            payload={
+                "scenario_key": str(match.get("scenario_key") or ""),
+                "won": bool(won),
+                "reason": reason,
+                "rating_delta": int((result_json.get("ratings") or {}).get(aid, {}).get("delta") or 0),
+            },
+            dedupe_suffix="resolved",
+        )
     return updated or match
 
 
-def _advance_werewolf_match(*, match: dict[str, Any], scenario: dict[str, Any], current_step: int) -> dict[str, Any]:
+def _advance_werewolf_match(
+    *,
+    match: dict[str, Any],
+    scenario: dict[str, Any],
+    current_step: int,
+    cognition_planner: Any = None,
+) -> dict[str, Any]:
     participants = scenario_store.list_match_participants(match_id=str(match["match_id"]))
     if not participants:
         return match
@@ -752,16 +951,58 @@ def _advance_werewolf_match(*, match: dict[str, Any], scenario: dict[str, Any], 
 
         target: str | None = None
         if wolves and villagers:
-            ranked = sorted(
-                villagers,
-                key=lambda aid: (-int(suspicion.get(aid, 0)), _rng(f"night-target:{match['match_id']}:{aid}:{current_step}").random()),
+            planner_target = _planner_call(
+                cognition_planner,
+                "werewolf_choose_target",
+                {
+                    "town_id": str(match.get("town_id") or ""),
+                    "agent_id": wolves[0],
+                    "match_id": str(match["match_id"]),
+                    "phase": "night",
+                    "step": int(current_step),
+                    "round_number": int(round_number),
+                    "alive_agent_ids": list(alive),
+                    "candidate_agent_ids": list(villagers),
+                    "role_map": role_map,
+                    "suspicion": suspicion,
+                },
             )
-            target = ranked[0] if ranked else None
+            planner_target_id = str((planner_target or {}).get("target_agent_id") or "").strip()
+            if planner_target_id in villagers:
+                target = planner_target_id
+            else:
+                ranked = sorted(
+                    villagers,
+                    key=lambda aid: (
+                        -int(suspicion.get(aid, 0)),
+                        _rng(f"night-target:{match['match_id']}:{aid}:{current_step}").random(),
+                    ),
+                )
+                target = ranked[0] if ranked else None
 
         protected: str | None = None
         if doctors:
             protect_candidates = sorted(alive, key=lambda aid: (-int(suspicion.get(aid, 0)), aid))
-            protected = _rng(f"night-protect:{match['match_id']}:{round_number}:{current_step}").choice(protect_candidates)
+            planner_protect = _planner_call(
+                cognition_planner,
+                "werewolf_choose_protect",
+                {
+                    "town_id": str(match.get("town_id") or ""),
+                    "agent_id": doctors[0],
+                    "match_id": str(match["match_id"]),
+                    "phase": "night",
+                    "step": int(current_step),
+                    "round_number": int(round_number),
+                    "alive_agent_ids": list(alive),
+                    "candidate_agent_ids": protect_candidates,
+                    "suspicion": suspicion,
+                },
+            )
+            planner_protect_id = str((planner_protect or {}).get("target_agent_id") or "").strip()
+            if planner_protect_id in protect_candidates:
+                protected = planner_protect_id
+            else:
+                protected = _rng(f"night-protect:{match['match_id']}:{round_number}:{current_step}").choice(protect_candidates)
             scenario_store.insert_match_event(
                 match_id=str(match["match_id"]),
                 step=int(current_step),
@@ -779,7 +1020,24 @@ def _advance_werewolf_match(*, match: dict[str, Any], scenario: dict[str, Any], 
                 inspect_candidates = [aid for aid in alive if aid != seer_id]
             if not inspect_candidates:
                 continue
-            inspected = _rng(f"night-inspect:{match['match_id']}:{seer_id}:{round_number}:{current_step}").choice(inspect_candidates)
+            planner_inspect = _planner_call(
+                cognition_planner,
+                "werewolf_choose_inspect",
+                {
+                    "town_id": str(match.get("town_id") or ""),
+                    "agent_id": seer_id,
+                    "match_id": str(match["match_id"]),
+                    "phase": "night",
+                    "step": int(current_step),
+                    "round_number": int(round_number),
+                    "alive_agent_ids": list(alive),
+                    "candidate_agent_ids": inspect_candidates,
+                    "known_results": known,
+                },
+            )
+            inspected = str((planner_inspect or {}).get("target_agent_id") or "").strip()
+            if inspected not in inspect_candidates:
+                inspected = _rng(f"night-inspect:{match['match_id']}:{seer_id}:{round_number}:{current_step}").choice(inspect_candidates)
             alignment = "werewolf" if _is_werewolf_role(role_map.get(inspected)) else "village"
             known[inspected] = alignment
             seer_results[seer_id] = known
@@ -792,6 +1050,14 @@ def _advance_werewolf_match(*, match: dict[str, Any], scenario: dict[str, Any], 
                 target_id=inspected,
                 data_json={"alignment": alignment},
             )
+            _record_scenario_memory(
+                agent_id=seer_id,
+                match_id=str(match["match_id"]),
+                kind="werewolf_seer_result",
+                summary=f"Inspection result: {inspected} looks {alignment}.",
+                payload={"target_agent_id": inspected, "alignment": alignment, "round": int(round_number)},
+                dedupe_suffix=f"inspect:{round_number}:{seer_id}",
+            )
 
         if target:
             if protected and target == protected:
@@ -803,6 +1069,14 @@ def _advance_werewolf_match(*, match: dict[str, Any], scenario: dict[str, Any], 
                     agent_id=None,
                     target_id=target,
                     data_json={"target": target},
+                )
+                _record_scenario_memory(
+                    agent_id=target,
+                    match_id=str(match["match_id"]),
+                    kind="werewolf_saved",
+                    summary="You survived the night due to protection.",
+                    payload={"round": int(round_number)},
+                    dedupe_suffix=f"saved:{round_number}",
                 )
             else:
                 _eliminate_agent(
@@ -819,6 +1093,14 @@ def _advance_werewolf_match(*, match: dict[str, Any], scenario: dict[str, Any], 
                     agent_id=wolves[0] if wolves else None,
                     target_id=target,
                     data_json={"by": wolves, "target": target},
+                )
+                _record_scenario_memory(
+                    agent_id=target,
+                    match_id=str(match["match_id"]),
+                    kind="werewolf_eliminated_night",
+                    summary="You were eliminated during the night.",
+                    payload={"round": int(round_number)},
+                    dedupe_suffix=f"night_elim:{round_number}",
                 )
                 if str(role_map.get(target) or "") == "hunter":
                     retaliation_targets = [aid for aid in alive if aid != target]
@@ -866,7 +1148,6 @@ def _advance_werewolf_match(*, match: dict[str, Any], scenario: dict[str, Any], 
         for target in previous_votes.values():
             suspicion[target] = suspicion.get(target, 0) + 1
 
-        # Lightweight "discussion" events for spectator narrative.
         for speaker in alive:
             chosen_target = _werewolf_vote_target(
                 voter_id=speaker,
@@ -875,6 +1156,26 @@ def _advance_werewolf_match(*, match: dict[str, Any], scenario: dict[str, Any], 
                 suspicion=suspicion,
                 rng_seed=f"speech-target:{match['match_id']}:{speaker}:{round_number}:{current_step}",
             )
+            planner_speech = _planner_call(
+                cognition_planner,
+                "werewolf_generate_speech",
+                {
+                    "town_id": str(match.get("town_id") or ""),
+                    "agent_id": speaker,
+                    "match_id": str(match["match_id"]),
+                    "phase": "day",
+                    "step": int(current_step),
+                    "round_number": int(round_number),
+                    "alive_agent_ids": list(alive),
+                    "role": str(role_map.get(speaker) or ""),
+                    "suggested_target": chosen_target,
+                    "suspicion": suspicion,
+                },
+            )
+            line = str((planner_speech or {}).get("line") or "").strip()
+            planner_target = str((planner_speech or {}).get("target_agent_id") or "").strip()
+            if planner_target in alive and planner_target != speaker:
+                chosen_target = planner_target
             if chosen_target:
                 scenario_store.insert_match_event(
                     match_id=str(match["match_id"]),
@@ -883,7 +1184,7 @@ def _advance_werewolf_match(*, match: dict[str, Any], scenario: dict[str, Any], 
                     event_type="speech",
                     agent_id=speaker,
                     target_id=chosen_target,
-                    data_json={"line": f"I suspect {chosen_target}."},
+                    data_json={"line": line or f"I suspect {chosen_target}."},
                 )
 
         votes: dict[str, str] = {}
@@ -895,6 +1196,24 @@ def _advance_werewolf_match(*, match: dict[str, Any], scenario: dict[str, Any], 
                 suspicion=suspicion,
                 rng_seed=f"day-vote:{match['match_id']}:{voter}:{round_number}:{current_step}",
             )
+            planner_vote = _planner_call(
+                cognition_planner,
+                "werewolf_choose_vote",
+                {
+                    "town_id": str(match.get("town_id") or ""),
+                    "agent_id": voter,
+                    "match_id": str(match["match_id"]),
+                    "phase": "day_vote",
+                    "step": int(current_step),
+                    "round_number": int(round_number),
+                    "alive_agent_ids": [aid for aid in alive if aid != voter],
+                    "role": str(role_map.get(voter) or ""),
+                    "suspicion": suspicion,
+                },
+            )
+            planner_target = str((planner_vote or {}).get("target_agent_id") or "").strip()
+            if planner_target in alive and planner_target != voter:
+                target = planner_target
             if target:
                 votes[voter] = target
 
@@ -940,6 +1259,14 @@ def _advance_werewolf_match(*, match: dict[str, Any], scenario: dict[str, Any], 
                 agent_id=None,
                 target_id=eliminated,
                 data_json={"eliminated": eliminated},
+            )
+            _record_scenario_memory(
+                agent_id=eliminated,
+                match_id=str(match["match_id"]),
+                kind="werewolf_eliminated_day",
+                summary="You were voted out during the day.",
+                payload={"round": int(round_number)},
+                dedupe_suffix=f"day_elim:{round_number}",
             )
             if str(role_map.get(eliminated) or "") == "hunter":
                 retaliation_targets = [aid for aid in alive if aid != eliminated]
@@ -1008,7 +1335,13 @@ def _advance_werewolf_match(*, match: dict[str, Any], scenario: dict[str, Any], 
     return updated or match
 
 
-def _advance_anaconda_match(*, match: dict[str, Any], scenario: dict[str, Any], current_step: int) -> dict[str, Any]:
+def _advance_anaconda_match(
+    *,
+    match: dict[str, Any],
+    scenario: dict[str, Any],
+    current_step: int,
+    cognition_planner: Any = None,
+) -> dict[str, Any]:
     participants = scenario_store.list_match_participants(match_id=str(match["match_id"]))
     if not participants:
         return match
@@ -1024,10 +1357,16 @@ def _advance_anaconda_match(*, match: dict[str, Any], scenario: dict[str, Any], 
 
     seat_order = _anaconda_seat_order(state, participants)
     chips = {str(k): int(v) for k, v in (state.get("chips") or {}).items() if str(k)}
+    contributions = {
+        str(k): int(v) for k, v in (state.get("contributions") or {}).items() if str(k)
+    }
     for participant in participants:
         aid = str(participant.get("agent_id") or "")
         if aid and aid not in chips:
             chips[aid] = int(state.get("buy_in") or scenario.get("buy_in") or 0)
+        if aid and aid not in contributions:
+            contributions[aid] = 0
+
     hands = {
         str(aid): [str(card).upper() for card in (cards or [])]
         for aid, cards in (state.get("hands") or {}).items()
@@ -1044,6 +1383,7 @@ def _advance_anaconda_match(*, match: dict[str, Any], scenario: dict[str, Any], 
         if str(aid)
     }
     folded = {str(aid) for aid in (state.get("folded_agent_ids") or []) if str(aid)}
+    all_in = {str(aid) for aid in (state.get("all_in_agent_ids") or []) if str(aid)}
     deck = [str(card).upper() for card in (state.get("deck") or [])]
     pot = int(state.get("pot") or 0)
 
@@ -1057,6 +1397,8 @@ def _advance_anaconda_match(*, match: dict[str, Any], scenario: dict[str, Any], 
                     hands[aid].append(deck.pop())
         arranged_hands = {}
         revealed_cards = {aid: [] for aid in seat_order}
+        all_in = set()
+        contributions = {aid: 0 for aid in seat_order}
         scenario_store.insert_match_event(
             match_id=str(match["match_id"]),
             step=int(current_step),
@@ -1074,6 +1416,22 @@ def _advance_anaconda_match(*, match: dict[str, Any], scenario: dict[str, Any], 
         for aid in active_order:
             current_hand = list(hands.get(aid, []))
             chosen = choose_pass_cards(current_hand, count=pass_count)
+            planner_pick = _planner_call(
+                cognition_planner,
+                "anaconda_choose_pass_cards",
+                {
+                    "town_id": str(match.get("town_id") or ""),
+                    "agent_id": aid,
+                    "match_id": str(match["match_id"]),
+                    "phase": str(phase),
+                    "step": int(current_step),
+                    "count": int(pass_count),
+                    "hand": list(current_hand),
+                },
+            )
+            planned_cards = [str(card).upper() for card in ((planner_pick or {}).get("cards") or []) if str(card)]
+            if len(planned_cards) == pass_count and all(card in current_hand for card in planned_cards):
+                chosen = planned_cards
             outgoing[aid] = chosen
             hands[aid] = _anaconda_remove_cards(current_hand, chosen)
 
@@ -1150,20 +1508,30 @@ def _advance_anaconda_match(*, match: dict[str, Any], scenario: dict[str, Any], 
     state["revealed_cards"] = revealed_cards
     state["deck"] = deck
     state["pot"] = pot
+    state["contributions"] = contributions
     state["folded_agent_ids"] = sorted(folded)
+    state["all_in_agent_ids"] = sorted(all_in)
 
     if phase != "showdown":
         bet_result = _anaconda_apply_bets(
+            match_id=str(match["match_id"]),
             state=state,
             participants=participants,
             phase=phase,
             current_step=current_step,
+            cognition_planner=cognition_planner,
         )
         for folded_agent in bet_result.get("folded") or []:
             scenario_store.update_match_participant(
                 match_id=str(match["match_id"]),
                 agent_id=str(folded_agent),
                 updates={"status": "folded"},
+            )
+        for all_in_agent in bet_result.get("all_in") or []:
+            scenario_store.update_match_participant(
+                match_id=str(match["match_id"]),
+                agent_id=str(all_in_agent),
+                updates={"status": "all_in"},
             )
         scenario_store.insert_match_event(
             match_id=str(match["match_id"]),
@@ -1175,6 +1543,7 @@ def _advance_anaconda_match(*, match: dict[str, Any], scenario: dict[str, Any], 
             data_json={
                 "bets": bet_result.get("bets") or {},
                 "folded": bet_result.get("folded") or [],
+                "all_in": bet_result.get("all_in") or [],
                 "pot": int(state.get("pot") or 0),
             },
         )
@@ -1208,12 +1577,14 @@ def _advance_anaconda_match(*, match: dict[str, Any], scenario: dict[str, Any], 
         showdown_rows: dict[str, Any] = {}
         best_score: tuple[int, tuple[int, ...]] | None = None
         winners: list[str] = []
+        score_map: dict[str, tuple[int, tuple[int, ...]]] = {}
         for aid in contenders:
             cards = list(arranged_hands.get(aid, [])) or list(hands.get(aid, []))
             if len(cards) < 5:
                 continue
             category, tiebreak, best_cards = evaluate_best_five(cards)
             score = (int(category), tuple(int(v) for v in tiebreak))
+            score_map[aid] = score
             showdown_rows[aid] = {
                 "cards": list(best_cards),
                 "category": int(category),
@@ -1228,16 +1599,42 @@ def _advance_anaconda_match(*, match: dict[str, Any], scenario: dict[str, Any], 
 
         pot = int(state.get("pot") or 0)
         chips = {str(k): int(v) for k, v in (state.get("chips") or {}).items() if str(k)}
-        if winners:
-            each = pot // max(1, len(winners))
-            remainder = pot - (each * len(winners))
-            for idx, aid in enumerate(sorted(winners)):
-                chips[aid] = int(chips.get(aid, 0)) + each + (1 if idx < remainder else 0)
+        payout_map: dict[str, int]
+        side_pots: list[dict[str, Any]]
+        contributions = {
+            str(aid): int(value)
+            for aid, value in (state.get("contributions") or {}).items()
+            if str(aid)
+        }
+        if contributions and score_map:
+            payout_map, side_pots = _anaconda_resolve_side_pots(
+                contributions=contributions,
+                score_map=score_map,
+            )
+        else:
+            payout_map = {}
+            side_pots = []
+            if winners and pot > 0:
+                each = pot // max(1, len(winners))
+                remainder = pot - (each * len(winners))
+                for idx, aid in enumerate(sorted(winners)):
+                    payout_map[aid] = each + (1 if idx < remainder else 0)
+
+        if payout_map:
+            distributed = sum(int(value) for value in payout_map.values())
+            if distributed != pot and winners:
+                delta = int(pot) - int(distributed)
+                payout_map[sorted(winners)[0]] = int(payout_map.get(sorted(winners)[0], 0)) + delta
+        for aid, payout in payout_map.items():
+            chips[aid] = int(chips.get(aid, 0)) + int(payout)
+
         state["chips"] = chips
         state["pot"] = 0
         state["showdown"] = {
             "rows": showdown_rows,
             "winners": winners,
+            "side_pots": side_pots,
+            "payouts": payout_map,
         }
         scenario_store.insert_match_event(
             match_id=str(match["match_id"]),
@@ -1246,9 +1643,28 @@ def _advance_anaconda_match(*, match: dict[str, Any], scenario: dict[str, Any], 
             event_type="showdown",
             agent_id=None,
             target_id=None,
-            data_json={"winners": winners, "hands": showdown_rows},
+            data_json={
+                "winners": winners,
+                "hands": showdown_rows,
+                "side_pots": side_pots,
+                "payouts": payout_map,
+            },
         )
         state["phase_index"] = phase_index
+        for item in participants:
+            aid = str(item.get("agent_id") or "")
+            if not aid:
+                continue
+            payout = int(payout_map.get(aid, 0))
+            label = str((showdown_rows.get(aid) or {}).get("category_label") or "no showdown")
+            _record_scenario_memory(
+                agent_id=aid,
+                match_id=str(match["match_id"]),
+                kind="anaconda_showdown",
+                summary=f"Showdown: {label}, payout {payout} chips.",
+                payload={"category_label": label, "payout": payout},
+                dedupe_suffix=f"showdown:{current_step}:{aid}",
+            )
         return _finalize_match(
             match=match,
             scenario=scenario,
@@ -1272,7 +1688,325 @@ def _advance_anaconda_match(*, match: dict[str, Any], scenario: dict[str, Any], 
     return updated or match
 
 
-def _advance_one_match(*, match: dict[str, Any], scenario: dict[str, Any], current_step: int) -> dict[str, Any]:
+def _cancel_match_without_ratings(
+    *,
+    match: dict[str, Any],
+    scenario: dict[str, Any],
+    participants: list[dict[str, Any]],
+    current_step: int,
+    reason: str,
+) -> dict[str, Any]:
+    state = dict(match.get("state_json") or {})
+    buy_in = max(0, int(scenario.get("buy_in") or 0))
+    wallet_payouts: dict[str, int] = {}
+    if buy_in > 0 and participants:
+        chips_state = {
+            str(aid): int(value)
+            for aid, value in (state.get("chips") or {}).items()
+            if str(aid)
+        }
+        for participant in participants:
+            aid = str(participant.get("agent_id") or "")
+            if not aid:
+                continue
+            payout = max(0, int(chips_state.get(aid, buy_in)))
+            wallet_payouts[aid] = payout
+            if payout:
+                scenario_store.update_wallet(agent_id=aid, delta=payout)
+
+    for participant in participants:
+        aid = str(participant.get("agent_id") or "")
+        if not aid:
+            continue
+        update_payload: dict[str, Any] = {"status": "cancelled"}
+        if buy_in > 0:
+            update_payload["chips_end"] = int(wallet_payouts.get(aid, 0))
+        scenario_store.update_match_participant(
+            match_id=str(match.get("match_id") or ""),
+            agent_id=aid,
+            updates=update_payload,
+        )
+
+    result_json = {
+        "winners": [],
+        "reason": str(reason),
+        "cancelled": True,
+        "wallet_payouts": wallet_payouts,
+        "resolved_at": _utc_now_iso(),
+    }
+    updated = scenario_store.update_match(
+        match_id=str(match.get("match_id") or ""),
+        status="cancelled",
+        phase="cancelled",
+        end_step=int(current_step),
+        state_json=state,
+        result_json=result_json,
+    )
+    scenario_store.insert_match_event(
+        match_id=str(match.get("match_id") or ""),
+        step=int(current_step),
+        phase="cancelled",
+        event_type="match_cancelled",
+        agent_id=None,
+        target_id=None,
+        data_json={"reason": str(reason)},
+    )
+    _notify_match_resolved(
+        match=match,
+        scenario=scenario,
+        participants=participants,
+        result_json=result_json,
+    )
+    for participant in participants:
+        aid = str(participant.get("agent_id") or "")
+        if not aid:
+            continue
+        _record_scenario_memory(
+            agent_id=aid,
+            match_id=str(match.get("match_id") or ""),
+            kind="match_cancelled",
+            summary=f"Match cancelled: {reason}",
+            payload={"reason": str(reason)},
+            dedupe_suffix="cancelled",
+        )
+    return updated or match
+
+
+def _forfeit_from_match(
+    *,
+    match: dict[str, Any],
+    scenario: dict[str, Any],
+    participants: list[dict[str, Any]],
+    agent_id: str,
+    current_step: int,
+    reason: str,
+) -> dict[str, Any]:
+    match_id = str(match.get("match_id") or "")
+    forfeiter = str(agent_id or "").strip()
+    if not forfeiter:
+        raise ValueError("Missing forfeit agent id")
+    ids = {str(item.get("agent_id") or "") for item in participants}
+    if forfeiter not in ids:
+        raise PermissionError("Agent is not a participant in this match")
+
+    scenario_store.update_match_participant(
+        match_id=match_id,
+        agent_id=forfeiter,
+        updates={"status": "forfeit"},
+    )
+    scenario_store.insert_match_event(
+        match_id=match_id,
+        step=int(current_step),
+        phase=str(match.get("phase") or ""),
+        event_type="forfeit",
+        agent_id=forfeiter,
+        target_id=None,
+        data_json={"reason": str(reason)},
+    )
+    _record_scenario_memory(
+        agent_id=forfeiter,
+        match_id=match_id,
+        kind="match_forfeit",
+        summary=f"You forfeited the match ({reason}).",
+        payload={"reason": str(reason)},
+        dedupe_suffix=f"forfeit:{current_step}",
+    )
+
+    status = str(match.get("status") or "").strip().lower()
+    state = dict(match.get("state_json") or {})
+    min_players = max(2, int(scenario.get("min_players") or 2))
+
+    # Warmup/forming forfeit can invalidate the match before it starts.
+    if status in {"forming", "warmup"}:
+        if "alive_agent_ids" in state:
+            state["alive_agent_ids"] = [aid for aid in (state.get("alive_agent_ids") or []) if str(aid) != forfeiter]
+        if "seat_order" in state:
+            state["seat_order"] = [aid for aid in (state.get("seat_order") or []) if str(aid) != forfeiter]
+        remaining = [aid for aid in ids if aid != forfeiter]
+        if len(remaining) < min_players:
+            return _cancel_match_without_ratings(
+                match=match,
+                scenario=scenario,
+                participants=participants,
+                current_step=current_step,
+                reason="Insufficient players after forfeit",
+            )
+        updated = scenario_store.update_match(
+            match_id=match_id,
+            state_json=state,
+        )
+        return updated or match
+
+    key = str(match.get("scenario_key") or "").lower()
+    if "werewolf" in key:
+        alive = _alive_ids_from_state(state=state, participants=participants)
+        dead = [str(aid) for aid in (state.get("dead_agent_ids") or []) if str(aid)]
+        _eliminate_agent(
+            match_id=match_id,
+            alive=alive,
+            dead=dead,
+            agent_id=forfeiter,
+            by_status="forfeit",
+        )
+        state["alive_agent_ids"] = alive
+        state["dead_agent_ids"] = dead
+        max_rounds = int((scenario.get("rules_json") or {}).get("max_rounds") or 6)
+        resolved, winners, resolved_reason = _resolve_werewolf(
+            alive=alive,
+            role_map=dict(state.get("role_map") or {}),
+            round_number=int(match.get("round_number") or 0),
+            max_rounds=max_rounds,
+        )
+        if resolved:
+            return _finalize_match(
+                match=match,
+                scenario=scenario,
+                participants=participants,
+                winners=winners,
+                current_step=current_step,
+                reason=resolved_reason or "Forfeit ended match",
+                state_json=state,
+            )
+        updated = scenario_store.update_match(match_id=match_id, state_json=state)
+        return updated or match
+
+    folded = {str(aid) for aid in (state.get("folded_agent_ids") or []) if str(aid)}
+    folded.add(forfeiter)
+    state["folded_agent_ids"] = sorted(folded)
+    active_after = _anaconda_active_ids(state, participants)
+    if len(active_after) <= 1 and active_after:
+        winner = active_after[0]
+        chips = {str(k): int(v) for k, v in (state.get("chips") or {}).items() if str(k)}
+        chips[winner] = int(chips.get(winner, 0)) + int(state.get("pot") or 0)
+        state["chips"] = chips
+        state["pot"] = 0
+        state["showdown"] = {"winners": [winner], "reason": "All opponents folded/forfeit"}
+        return _finalize_match(
+            match=match,
+            scenario=scenario,
+            participants=participants,
+            winners=[winner],
+            current_step=current_step,
+            reason="All opponents folded/forfeit",
+            state_json=state,
+        )
+    updated = scenario_store.update_match(match_id=match_id, state_json=state)
+    return updated or match
+
+
+def cancel_match(
+    *,
+    match_id: str,
+    requested_by_agent_id: str | None,
+    current_step: int = 0,
+    reason: str = "Cancelled by participant",
+) -> dict[str, Any]:
+    match = scenario_store.get_match(match_id=str(match_id))
+    if not match:
+        raise ValueError(f"Match not found: {match_id}")
+    status = str(match.get("status") or "").strip().lower()
+    if status in RESOLVED_MATCH_STATUSES:
+        return match
+    if status == "active":
+        raise RuntimeError("Active matches cannot be cancelled directly; use forfeit")
+
+    participants = scenario_store.list_match_participants(match_id=str(match_id))
+    participant_ids = {str(item.get("agent_id") or "") for item in participants}
+    requested = str(requested_by_agent_id or "").strip()
+    if requested and requested not in participant_ids:
+        raise PermissionError("Only match participants can cancel this match")
+
+    scenario = scenario_store.get_scenario(scenario_key=str(match.get("scenario_key") or ""))
+    if not scenario:
+        raise ValueError("Scenario definition missing")
+    return _cancel_match_without_ratings(
+        match=match,
+        scenario=scenario,
+        participants=participants,
+        current_step=int(current_step),
+        reason=str(reason),
+    )
+
+
+def forfeit_match(
+    *,
+    match_id: str,
+    agent_id: str,
+    current_step: int = 0,
+    reason: str = "Player forfeited",
+) -> dict[str, Any]:
+    match = scenario_store.get_match(match_id=str(match_id))
+    if not match:
+        raise ValueError(f"Match not found: {match_id}")
+    status = str(match.get("status") or "").strip().lower()
+    if status in RESOLVED_MATCH_STATUSES:
+        return match
+
+    scenario = scenario_store.get_scenario(scenario_key=str(match.get("scenario_key") or ""))
+    if not scenario:
+        raise ValueError("Scenario definition missing")
+    participants = scenario_store.list_match_participants(match_id=str(match_id))
+    return _forfeit_from_match(
+        match=match,
+        scenario=scenario,
+        participants=participants,
+        agent_id=str(agent_id),
+        current_step=int(current_step),
+        reason=str(reason),
+    )
+
+
+def _auto_forfeit_departed_participants(
+    *,
+    match: dict[str, Any],
+    scenario: dict[str, Any],
+    current_step: int,
+) -> dict[str, Any]:
+    town_id = str(match.get("town_id") or "")
+    if not town_id:
+        return match
+    member_map = _collect_town_member_map(town_id)
+    participants = scenario_store.list_match_participants(match_id=str(match.get("match_id") or ""))
+    updated_match = match
+    for participant in participants:
+        aid = str(participant.get("agent_id") or "")
+        if not aid:
+            continue
+        status = str(participant.get("status") or "").strip().lower()
+        if not _status_is_active_participant(status):
+            continue
+        if aid in member_map:
+            continue
+        updated_match = _forfeit_from_match(
+            match=updated_match,
+            scenario=scenario,
+            participants=scenario_store.list_match_participants(match_id=str(match.get("match_id") or "")),
+            agent_id=aid,
+            current_step=int(current_step),
+            reason="Agent left town",
+        )
+        if str(updated_match.get("status") or "").strip().lower() in RESOLVED_MATCH_STATUSES:
+            return updated_match
+    return updated_match
+
+
+def _advance_one_match(
+    *,
+    match: dict[str, Any],
+    scenario: dict[str, Any],
+    current_step: int,
+    cognition_planner: Any = None,
+) -> dict[str, Any]:
+    status = str(match.get("status") or "").strip().lower()
+    if status in RESOLVED_MATCH_STATUSES:
+        return match
+
+    # Agents may leave the town while a match is running; treat that as forfeit.
+    match = _auto_forfeit_departed_participants(
+        match=match,
+        scenario=scenario,
+        current_step=int(current_step),
+    )
     status = str(match.get("status") or "").strip().lower()
     if status in RESOLVED_MATCH_STATUSES:
         return match
@@ -1338,11 +2072,21 @@ def _advance_one_match(*, match: dict[str, Any], scenario: dict[str, Any], curre
 
     key = str(match.get("scenario_key") or "").lower()
     if "werewolf" in key:
-        return _advance_werewolf_match(match=match, scenario=scenario, current_step=current_step)
-    return _advance_anaconda_match(match=match, scenario=scenario, current_step=current_step)
+        return _advance_werewolf_match(
+            match=match,
+            scenario=scenario,
+            current_step=current_step,
+            cognition_planner=cognition_planner,
+        )
+    return _advance_anaconda_match(
+        match=match,
+        scenario=scenario,
+        current_step=current_step,
+        cognition_planner=cognition_planner,
+    )
 
 
-def advance_matches(*, town_id: str, current_step: int) -> list[dict[str, Any]]:
+def advance_matches(*, town_id: str, current_step: int, cognition_planner: Any = None) -> list[dict[str, Any]]:
     active = scenario_store.list_active_matches(town_id=town_id)
     if not active:
         return []
@@ -1352,9 +2096,26 @@ def advance_matches(*, town_id: str, current_step: int) -> list[dict[str, Any]]:
         scenario = scenario_store.get_scenario(scenario_key=str(match.get("scenario_key") or ""))
         if not scenario:
             continue
-        updated = _advance_one_match(match=match, scenario=scenario, current_step=int(current_step))
+        updated = _advance_one_match(
+            match=match,
+            scenario=scenario,
+            current_step=int(current_step),
+            cognition_planner=cognition_planner,
+        )
         out.append(updated)
     return out
+
+
+_SCENARIO_MANAGER = TownScenarioManager(
+    form_matches_fn=lambda town_id, step: form_matches(town_id=town_id, current_step=step),
+    advance_matches_fn=lambda town_id, step: advance_matches(town_id=town_id, current_step=step),
+    list_active_matches_fn=lambda town_id: list_active_matches_for_town(town_id=town_id),
+    scenario_statuses_fn=lambda town_id: get_town_agent_scenario_statuses(town_id=town_id),
+)
+
+
+def get_town_scenario_manager() -> TownScenarioManager:
+    return _SCENARIO_MANAGER
 
 
 def get_agent_queue_status(*, agent_id: str) -> list[dict[str, Any]]:
@@ -1434,6 +2195,7 @@ def get_spectator_payload(*, match_id: str) -> dict[str, Any] | None:
         "pot": int(state.get("pot") or 0),
         "alive_agent_ids": [str(v) for v in (state.get("alive_agent_ids") or []) if str(v)],
         "folded_agent_ids": [str(v) for v in (state.get("folded_agent_ids") or []) if str(v)],
+        "all_in_agent_ids": [str(v) for v in (state.get("all_in_agent_ids") or []) if str(v)],
         "revealed_cards": revealed_cards,
         "participants": [
             {
@@ -1442,6 +2204,7 @@ def get_spectator_payload(*, match_id: str) -> dict[str, Any] | None:
                 "score": item.get("score"),
                 "chips": chips_map.get(str(item.get("agent_id") or ""), 0),
                 "chips_end": item.get("chips_end"),
+                "rating_delta": item.get("rating_delta"),
                 "role": item.get("role") if str(match.get("status")) == "resolved" else None,
             }
             for item in participants
