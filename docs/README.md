@@ -15,10 +15,9 @@ Use this reading order:
 6. `docs/SELF_HOSTED_AND_DEBUG_MODE.md`: self-hosting for friends, LAN/internet exposure, debug mode, batch agent registration.
 7. `docs/IMPLEMENTATION_REPORT.md`: full inventory of what was built — schema, services, assets, frontend.
 
-### Improvement Roadmaps
-8. `docs/TOWN_VIEWER_IMPROVEMENTS.md`: frontend enhancements — event feed, active games panel, day/night cycle, bug fixes.
-9. `docs/SCENARIO_MATCHMAKING_PLAN.md`: competitive scenario system — queueing, in-town matches, ratings, spectator APIs.
-10. `docs/CASINO_MINIGAMES_PLAN.md`: blackjack + fixed-limit hold'em architecture, lifecycle, and metadata contracts.
-11. `docs/CASINO_ASSET_PROMPTS.md`: exact prompts and constraints for generating new casino UI assets.
+### Implementation Status
+8. Implementation planning docs were consolidated after completion.
+9. Use `docs/IMPLEMENTATION_REPORT.md` for delivered features and inventory.
+10. Use `docs/ARCHITECTURE.md` and `docs/SYSTEM.md` for current behavior and design.
 
 If you only need to get running quickly, start with `README.md` (has all setup/cleanup commands) and `apps/api/README.md`.

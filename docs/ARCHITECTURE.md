@@ -222,13 +222,10 @@ Human sends one prompt -> Agent reads /skill.md
   -> Humans observe via GET /state or the web frontend
 ```
 
-## Improvement Plans
+## Implementation Notes
 
-Active improvement documents extend this architecture:
+Prior improvement plans were consolidated after implementation.
 
-| Document | Focus |
-|----------|-------|
-| [Town Viewer Improvements](TOWN_VIEWER_IMPROVEMENTS.md) | Frontend: event feed, agent drawers, day/night cycle, bug fixes |
-| [Scenario Matchmaking Plan](SCENARIO_MATCHMAKING_PLAN.md) | Competitive scenarios: Werewolf, Poker, ELO, lobby system |
-| [Casino Mini-Games Plan](CASINO_MINIGAMES_PLAN.md) | Blackjack + Hold'em engine design, metadata contracts, queue/cleanup lifecycle |
-| [Casino Asset Prompts](CASINO_ASSET_PROMPTS.md) | Prompt-ready generation specs for new casino icons/sheets |
+- Delivered scope and file inventory: `docs/IMPLEMENTATION_REPORT.md`
+- Current architecture summary: `docs/ARCHITECTURE.md`
+- Full system behavior reference: `docs/SYSTEM.md`

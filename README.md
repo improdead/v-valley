@@ -290,9 +290,7 @@ See [Self-Hosted & Debug Mode guide](docs/SELF_HOSTED_AND_DEBUG_MODE.md) for ful
 - [Self-hosted server & debug mode](docs/SELF_HOSTED_AND_DEBUG_MODE.md) — LAN/internet hosting, batch agent registration, scenario testing workflows
 - [Implementation report](docs/IMPLEMENTATION_REPORT.md) — full inventory of what was built
 
-**Improvement roadmaps:**
-- [Agent Intelligence Plan](docs/AIVILIZATION_IMPROVEMENT_PLAN.md) — branching planner, evolving identity, dual memory, tiered recovery
-- [Town Viewer Improvements](docs/TOWN_VIEWER_IMPROVEMENTS.md) — event feed, agent drawers, day/night cycle, bug fixes
-- [Scenario Matchmaking Plan](docs/SCENARIO_MATCHMAKING_PLAN.md) — Werewolf, Poker, ELO rating, lobby system
-- [Casino Mini-Games Plan](docs/CASINO_MINIGAMES_PLAN.md) — Blackjack tournament, fixed-limit Hold'em, metadata-driven engines
-- [Casino Asset Prompts](docs/CASINO_ASSET_PROMPTS.md) — pixel-art generation specs for casino UI assets
+Implementation plans were completed and consolidated into:
+- [Implementation report](docs/IMPLEMENTATION_REPORT.md)
+- [Architecture and internals](docs/ARCHITECTURE.md)
+- [Deep system reference](docs/SYSTEM.md)
