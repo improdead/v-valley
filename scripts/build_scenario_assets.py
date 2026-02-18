@@ -263,6 +263,113 @@ def icon_table(c: Canvas) -> None:
     c.stroke_rect(4, 9, 24, 14, PALETTE["sun"])
 
 
+def icon_blackjack(c: Canvas) -> None:
+    bg(c, PALETTE["night_2"], PALETTE["night_0"])
+    c.fill_rect(7, 5, 12, 20, PALETTE["white"])
+    c.stroke_rect(7, 5, 12, 20, PALETTE["ink"])
+    c.fill_rect(10, 8, 6, 6, PALETTE["ember"])
+    c.fill_rect(19, 9, 8, 8, PALETTE["sun"])
+    c.circle(23, 13, 4, PALETTE["sun"], fill=True)
+    c.circle(23, 13, 4, PALETTE["ink"])
+
+
+def icon_holdem(c: Canvas) -> None:
+    bg(c, PALETTE["leaf_2"], PALETTE["leaf_0"])
+    c.fill_rect(5, 7, 10, 16, PALETTE["white"])
+    c.fill_rect(17, 9, 10, 16, PALETTE["white"])
+    c.stroke_rect(5, 7, 10, 16, PALETTE["ink"])
+    c.stroke_rect(17, 9, 10, 16, PALETTE["ink"])
+    c.fill_rect(8, 10, 4, 4, PALETTE["cyan"])
+    c.fill_rect(20, 12, 4, 4, PALETTE["ember"])
+    c.circle(16, 24, 4, PALETTE["sun"], fill=True)
+    c.circle(16, 24, 4, PALETTE["ink"])
+
+
+def icon_bj_hit(c: Canvas) -> None:
+    bg(c, PALETTE["night_2"], PALETTE["night_0"])
+    c.fill_rect(5, 14, 22, 4, PALETTE["cyan"])
+    c.fill_rect(14, 5, 4, 22, PALETTE["cyan"])
+    c.stroke_rect(4, 4, 24, 24, PALETTE["ink"])
+
+
+def icon_bj_stand(c: Canvas) -> None:
+    bg(c, PALETTE["night_2"], PALETTE["night_0"])
+    c.line(6, 17, 14, 24, PALETTE["sun"])
+    c.line(14, 24, 26, 8, PALETTE["sun"])
+    c.line(6, 16, 14, 23, PALETTE["sun"])
+    c.line(14, 23, 26, 7, PALETTE["sun"])
+    c.stroke_rect(4, 4, 24, 24, PALETTE["ink"])
+
+
+def icon_bj_double(c: Canvas) -> None:
+    bg(c, PALETTE["night_2"], PALETTE["night_0"])
+    c.circle(12, 16, 6, PALETTE["ember"], fill=True)
+    c.circle(20, 16, 6, PALETTE["sun"], fill=True)
+    c.circle(12, 16, 6, PALETTE["ink"])
+    c.circle(20, 16, 6, PALETTE["ink"])
+    c.stroke_rect(4, 4, 24, 24, PALETTE["ink"])
+
+
+def icon_bj_actions_sheet(c: Canvas) -> None:
+    bg(c, PALETTE["night_2"], PALETTE["night_0"])
+    c.fill_rect(2, 12, 7, 2, PALETTE["cyan"])  # HIT bar
+    c.fill_rect(4, 10, 2, 7, PALETTE["cyan"])  # HIT stem
+    c.line(12, 13, 14, 15, PALETTE["sun"])     # STAND check
+    c.line(14, 15, 18, 10, PALETTE["sun"])
+    c.circle(24, 13, 4, PALETTE["ember"], fill=True)  # DOUBLE chips
+    c.circle(27, 17, 4, PALETTE["sun"], fill=True)
+    c.circle(24, 13, 4, PALETTE["ink"])
+    c.circle(27, 17, 4, PALETTE["ink"])
+    c.stroke_rect(1, 1, 30, 30, PALETTE["ink"])
+
+
+def icon_marker_dealer(c: Canvas) -> None:
+    bg(c, PALETTE["leaf_1"], PALETTE["leaf_0"])
+    c.circle(16, 16, 10, PALETTE["sun"], fill=True)
+    c.circle(16, 16, 10, PALETTE["ink"])
+    c.fill_rect(10, 11, 2, 10, PALETTE["ink"])
+    c.line(12, 11, 19, 14, PALETTE["ink"])
+    c.line(12, 21, 19, 18, PALETTE["ink"])
+
+
+def icon_marker_sb(c: Canvas) -> None:
+    bg(c, PALETTE["leaf_1"], PALETTE["leaf_0"])
+    c.circle(16, 16, 10, PALETTE["silver"], fill=True)
+    c.circle(16, 16, 10, PALETTE["ink"])
+    c.fill_rect(9, 11, 2, 10, PALETTE["ink"])
+    c.fill_rect(12, 11, 7, 2, PALETTE["ink"])
+    c.fill_rect(12, 15, 6, 2, PALETTE["ink"])
+    c.fill_rect(12, 19, 7, 2, PALETTE["ink"])
+
+
+def icon_marker_bb(c: Canvas) -> None:
+    bg(c, PALETTE["leaf_1"], PALETTE["leaf_0"])
+    c.circle(16, 16, 10, PALETTE["cyan"], fill=True)
+    c.circle(16, 16, 10, PALETTE["ink"])
+    c.fill_rect(9, 11, 2, 10, PALETTE["ink"])
+    c.fill_rect(12, 11, 6, 2, PALETTE["ink"])
+    c.fill_rect(12, 15, 5, 2, PALETTE["ink"])
+    c.fill_rect(12, 19, 6, 2, PALETTE["ink"])
+    c.fill_rect(18, 13, 2, 6, PALETTE["ink"])
+
+
+def icon_holdem_markers_sheet(c: Canvas) -> None:
+    bg(c, PALETTE["leaf_1"], PALETTE["leaf_0"])
+    c.circle(7, 16, 6, PALETTE["sun"], fill=True)
+    c.circle(16, 16, 6, PALETTE["silver"], fill=True)
+    c.circle(25, 16, 6, PALETTE["cyan"], fill=True)
+    c.circle(7, 16, 6, PALETTE["ink"])
+    c.circle(16, 16, 6, PALETTE["ink"])
+    c.circle(25, 16, 6, PALETTE["ink"])
+    c.fill_rect(5, 14, 2, 4, PALETTE["ink"])   # D
+    c.fill_rect(14, 13, 3, 2, PALETTE["ink"])  # SB
+    c.fill_rect(14, 17, 3, 2, PALETTE["ink"])
+    c.fill_rect(23, 13, 3, 2, PALETTE["ink"])  # BB
+    c.fill_rect(23, 17, 3, 2, PALETTE["ink"])
+    c.fill_rect(25, 15, 1, 2, PALETTE["ink"])
+    c.stroke_rect(1, 1, 30, 30, PALETTE["ink"])
+
+
 def icon_card_back(c: Canvas) -> None:
     bg(c, PALETTE["leaf_1"], PALETTE["leaf_0"])
     c.fill_rect(8, 5, 16, 22, PALETTE["white"])
@@ -415,6 +522,20 @@ PACKS: dict[str, list[FrameSpec]] = {
         FrameSpec("pass_arrow_left", icon_arrow_left),
         FrameSpec("pass_arrow_right", icon_arrow_right),
         FrameSpec("winner_crown", icon_crown),
+    ],
+    "blackjack": [
+        FrameSpec("icon", icon_blackjack),
+        FrameSpec("actions_sheet", icon_bj_actions_sheet),
+        FrameSpec("action_hit", icon_bj_hit),
+        FrameSpec("action_stand", icon_bj_stand),
+        FrameSpec("action_double", icon_bj_double),
+    ],
+    "holdem": [
+        FrameSpec("icon", icon_holdem),
+        FrameSpec("markers_sheet", icon_holdem_markers_sheet),
+        FrameSpec("marker_dealer", icon_marker_dealer),
+        FrameSpec("marker_sb", icon_marker_sb),
+        FrameSpec("marker_bb", icon_marker_bb),
     ],
     "shared": [
         FrameSpec("queue_panel", icon_queue_panel),

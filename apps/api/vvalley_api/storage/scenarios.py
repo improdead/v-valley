@@ -55,6 +55,9 @@ DEFAULT_SCENARIO_DEFINITIONS: list[dict[str, Any]] = [
         "warmup_steps": 2,
         "max_duration_steps": 30,
         "rules_json": {
+            "engine": "werewolf",
+            "ui_group": "social",
+            "spectator_kind": "werewolf",
             "phase_sequence": ["night", "day"],
             "max_rounds": 6,
             "arena_id": "park_circle",
@@ -74,6 +77,9 @@ DEFAULT_SCENARIO_DEFINITIONS: list[dict[str, Any]] = [
         "warmup_steps": 2,
         "max_duration_steps": 20,
         "rules_json": {
+            "engine": "anaconda",
+            "ui_group": "casino",
+            "spectator_kind": "anaconda",
             "phase_sequence": [
                 "deal",
                 "pass1",
@@ -90,6 +96,60 @@ DEFAULT_SCENARIO_DEFINITIONS: list[dict[str, Any]] = [
             "arena_id": "hobbs_cafe_table",
             "small_blind": 5,
             "big_blind": 10,
+        },
+        "rating_mode": "elo",
+        "buy_in": 100,
+        "enabled": 1,
+    },
+    {
+        "scenario_key": "blackjack_tournament",
+        "name": "Blackjack Tournament (2-6 Players)",
+        "description": "Multiplayer tournament blackjack versus a shared dealer.",
+        "category": "card_game",
+        "min_players": 2,
+        "max_players": 6,
+        "team_size": None,
+        "warmup_steps": 2,
+        "max_duration_steps": 24,
+        "rules_json": {
+            "engine": "blackjack",
+            "ui_group": "casino",
+            "spectator_kind": "blackjack",
+            "phase_sequence": ["deal", "player_turns", "dealer_turn", "settle"],
+            "arena_id": "hobbs_cafe_table",
+            "max_hands": 8,
+            "min_bet": 5,
+            "max_bet": 25,
+            "dealer_soft17_stand": True,
+            "allow_double": True,
+            "allow_split": False,
+            "allow_insurance": False,
+        },
+        "rating_mode": "elo",
+        "buy_in": 50,
+        "enabled": 1,
+    },
+    {
+        "scenario_key": "holdem_fixed_limit",
+        "name": "Texas Hold'em (Fixed Limit, 2-6 Players)",
+        "description": "Single-hand fixed-limit hold'em with blinds and showdown.",
+        "category": "card_game",
+        "min_players": 2,
+        "max_players": 6,
+        "team_size": None,
+        "warmup_steps": 2,
+        "max_duration_steps": 18,
+        "rules_json": {
+            "engine": "holdem",
+            "ui_group": "casino",
+            "spectator_kind": "holdem",
+            "phase_sequence": ["preflop", "flop", "turn", "river", "showdown"],
+            "arena_id": "hobbs_cafe_table",
+            "small_blind": 5,
+            "big_blind": 10,
+            "bet_units": [10, 10, 20, 20],
+            "max_raises_per_street": 3,
+            "hands_per_match": 1,
         },
         "rating_mode": "elo",
         "buy_in": 100,
@@ -475,9 +535,15 @@ class SQLiteScenarioStore(ScenarioStore):
                 "ON scenario_match_events(match_id, step DESC, created_at DESC)"
             )
 
-            existing = conn.execute("SELECT COUNT(1) AS n FROM scenario_definitions").fetchone()
-            if not existing or int(existing["n"] or 0) == 0:
-                for item in DEFAULT_SCENARIO_DEFINITIONS:
+            for item in DEFAULT_SCENARIO_DEFINITIONS:
+                key = str(item.get("scenario_key") or "").strip()
+                if not key:
+                    continue
+                existing = conn.execute(
+                    "SELECT scenario_key, rules_json FROM scenario_definitions WHERE scenario_key = ?",
+                    (key,),
+                ).fetchone()
+                if not existing:
                     conn.execute(
                         f"""
                         INSERT INTO scenario_definitions (
@@ -487,7 +553,7 @@ class SQLiteScenarioStore(ScenarioStore):
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ({_now_utc_sqlite()}), ({_now_utc_sqlite()}))
                         """,
                         (
-                            item["scenario_key"],
+                            key,
                             item["name"],
                             item["description"],
                             item["category"],
@@ -501,6 +567,24 @@ class SQLiteScenarioStore(ScenarioStore):
                             int(item.get("buy_in") or 0),
                             1 if bool(item.get("enabled", True)) else 0,
                         ),
+                    )
+                    continue
+                existing_rules = _json_loads(dict(existing).get("rules_json"), {})
+                if not isinstance(existing_rules, dict):
+                    existing_rules = {}
+                default_rules = item.get("rules_json") or {}
+                if not isinstance(default_rules, dict):
+                    default_rules = {}
+                merged_rules = dict(default_rules)
+                merged_rules.update(existing_rules)
+                if merged_rules != existing_rules:
+                    conn.execute(
+                        f"""
+                        UPDATE scenario_definitions
+                        SET rules_json = ?, updated_at = ({_now_utc_sqlite()})
+                        WHERE scenario_key = ?
+                        """,
+                        (_json_dumps(merged_rules), key),
                     )
 
         self._initialized = True

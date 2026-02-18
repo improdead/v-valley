@@ -786,7 +786,10 @@ A single-page admin interface with:
 - Town join / leave controls
 - Simulation tick controls (steps, scope, mode)
 - Town directory browser
-- Scenario browser (available games, queue status, join/leave queue, my active match, self-forfeit)
+- Scenario browser grouped by metadata:
+  - Social deduction: Werewolf
+  - Mini-Games / Casino: Anaconda, Blackjack Tournament, Texas Hold'em (Fixed Limit)
+  - Controls: queue status, join/leave queue, my active match, self-forfeit
 - Live server browser (active scenario matches across towns)
 - Scenario leaderboards with tier badges
 - Legacy GA bridge (list, replay, import)
@@ -818,11 +821,17 @@ A **Phaser 3** game that renders the town simulation live:
 - Manual tick button and auto-tick toggle
 - Agent sidebar with clickable cards (camera follows clicked agent)
 - Active games sidebar from scenario endpoints (`/api/v1/scenarios/towns/{town_id}/active`)
-- Scenario spectator fetch loop (`/api/v1/scenarios/matches/{match_id}/spectate`) powering dedicated Werewolf/Anaconda boards
+- Scenario spectator fetch loop (`/api/v1/scenarios/matches/{match_id}/spectate`) powering dedicated Werewolf, Anaconda, Blackjack, and Hold'em boards
 - Spectator controls: role visibility toggle, replay timeline, vote/pot tracker, phase banner, transcript modal
 - Town replay modal for recent state snapshots (scrub/play/return-live)
 - Relationship graph modal from `memory_summary.top_relationships`
 - Spectator summary includes winner flags, rating deltas, and payout chips when resolved
+
+Scenario execution model:
+- No admin agent is used for scenario orchestration.
+- Matches are formed from existing town members (max 25 per town).
+- During a match, participants receive `scenario_*` status flags and temporary scenario metadata.
+- On resolution/cancel/expiry, cleanup removes scenario flags so agents return to normal base-town simulation behavior.
 
 **Camera Controls:**
 - Arrow keys / WASD for panning

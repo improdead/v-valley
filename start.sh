@@ -6,6 +6,7 @@
 #   ./start.sh --api                             Start only the API server
 #   ./start.sh --web                             Start only the Web UI
 #   ./start.sh --api-port 8090 --web-port 5173  Start with custom ports
+#   ./start.sh --lan                             Bind API + Web to 0.0.0.0 (LAN-accessible)
 #
 # Prerequisites: Python 3.12+
 # The script will create a virtualenv and install dependencies automatically.
@@ -16,6 +17,8 @@ ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENV_DIR="$ROOT_DIR/.venv"
 API_PORT="${VVALLEY_API_PORT:-8080}"
 WEB_PORT="${VVALLEY_WEB_PORT:-3000}"
+API_HOST="${VVALLEY_API_HOST:-127.0.0.1}"
+WEB_HOST="${VVALLEY_WEB_HOST:-127.0.0.1}"
 
 # --- Colors (disabled if not a terminal) ---
 if [ -t 1 ]; then
@@ -43,16 +46,28 @@ Options:
   --web              Start only the Web UI
   --api-port PORT    API port (default: ${API_PORT})
   --web-port PORT    Web UI port (default: ${WEB_PORT})
+  --api-host HOST    API bind host (default: ${API_HOST})
+  --web-host HOST    Web UI bind host (default: ${WEB_HOST})
+  --host HOST        Set both API and Web bind hosts
+  --lan              Shortcut for --host 0.0.0.0
   -h, --help         Show this help message
 
 Environment:
   VVALLEY_API_PORT   Default API port override
   VVALLEY_WEB_PORT   Default Web UI port override
+  VVALLEY_API_HOST   Default API bind host override
+  VVALLEY_WEB_HOST   Default Web bind host override
 EOF
 }
 
 is_valid_port() {
   [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+is_valid_host() {
+  local host="$1"
+  [ -n "${host}" ] || return 1
+  [[ "$host" =~ ^[a-zA-Z0-9._:-]+$ ]]
 }
 
 ensure_port_free() {
@@ -94,6 +109,27 @@ while [[ $# -gt 0 ]]; do
       WEB_PORT="$2"
       shift 2
       ;;
+    --api-host)
+      [ $# -ge 2 ] || die "--api-host requires a host value."
+      API_HOST="$2"
+      shift 2
+      ;;
+    --web-host)
+      [ $# -ge 2 ] || die "--web-host requires a host value."
+      WEB_HOST="$2"
+      shift 2
+      ;;
+    --host)
+      [ $# -ge 2 ] || die "--host requires a host value."
+      API_HOST="$2"
+      WEB_HOST="$2"
+      shift 2
+      ;;
+    --lan)
+      API_HOST="0.0.0.0"
+      WEB_HOST="0.0.0.0"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -109,6 +145,12 @@ if $START_API; then
 fi
 if $START_WEB; then
   is_valid_port "$WEB_PORT" || die "Invalid Web UI port '${WEB_PORT}' (expected 1-65535)."
+fi
+if $START_API; then
+  is_valid_host "$API_HOST" || die "Invalid API host '${API_HOST}'."
+fi
+if $START_WEB; then
+  is_valid_host "$WEB_HOST" || die "Invalid Web UI host '${WEB_HOST}'."
 fi
 
 if $START_API && $START_WEB && [ "$API_PORT" -eq "$WEB_PORT" ]; then
@@ -184,8 +226,9 @@ trap cleanup EXIT INT TERM
 
 # --- Start API ---
 if $START_API; then
-  info "Starting API server on http://127.0.0.1:${API_PORT} ..."
+  info "Starting API server on http://${API_HOST}:${API_PORT} ..."
   uvicorn apps.api.vvalley_api.main:app \
+    --host "$API_HOST" \
     --reload \
     --port "$API_PORT" \
     --log-level info \
@@ -196,9 +239,13 @@ fi
 # --- Wait for API to be ready before starting web (so the UI can reach it) ---
 if $START_API && $START_WEB; then
   if command -v curl >/dev/null 2>&1; then
+    PROBE_HOST="$API_HOST"
+    if [ "$PROBE_HOST" = "0.0.0.0" ] || [ "$PROBE_HOST" = "::" ]; then
+      PROBE_HOST="127.0.0.1"
+    fi
     info "Waiting for API to become ready ..."
     for i in $(seq 1 30); do
-      if curl -sf "http://127.0.0.1:${API_PORT}/healthz" >/dev/null 2>&1; then
+      if curl -sf "http://${PROBE_HOST}:${API_PORT}/healthz" >/dev/null 2>&1; then
         ok "API is ready."
         break
       fi
@@ -214,18 +261,24 @@ fi
 
 # --- Start Web UI ---
 if $START_WEB; then
-  info "Starting Web UI on http://127.0.0.1:${WEB_PORT} ..."
-  python -m http.server "$WEB_PORT" --directory "$ROOT_DIR/apps/web" &
+  info "Starting Web UI on http://${WEB_HOST}:${WEB_PORT} ..."
+  python -m http.server "$WEB_PORT" --directory "$ROOT_DIR/apps/web" --bind "$WEB_HOST" &
   PIDS+=($!)
 fi
 
 # --- Summary ---
 printf "\n"
 printf "${BOLD}V-Valley is running:${RESET}\n"
-$START_API && printf "  ${GREEN}API${RESET}  → http://127.0.0.1:${API_PORT}  (Swagger: http://127.0.0.1:${API_PORT}/docs)\n"
-$START_WEB && printf "  ${GREEN}Web${RESET}  → http://127.0.0.1:${WEB_PORT}\n"
+$START_API && printf "  ${GREEN}API${RESET}  → http://${API_HOST}:${API_PORT}  (Swagger: http://${API_HOST}:${API_PORT}/docs)\n"
+$START_WEB && printf "  ${GREEN}Web${RESET}  → http://${WEB_HOST}:${WEB_PORT}\n"
 if $START_WEB && [ "$API_PORT" -ne 8080 ]; then
-  warn "Web UI defaults to API port 8080. In the page, set API Base to http://127.0.0.1:${API_PORT}."
+  warn "Web UI defaults to API port 8080. In the page, set API Base to http://${API_HOST}:${API_PORT}."
+fi
+if $START_API && { [ "$API_HOST" = "0.0.0.0" ] || [ "$API_HOST" = "::" ]; }; then
+  warn "API is bound to all interfaces. Use your LAN IP instead of ${API_HOST} from other devices."
+fi
+if $START_WEB && { [ "$WEB_HOST" = "0.0.0.0" ] || [ "$WEB_HOST" = "::" ]; }; then
+  warn "Web UI is bound to all interfaces. Use your LAN IP instead of ${WEB_HOST} from other devices."
 fi
 printf "\nPress ${BOLD}Ctrl+C${RESET} to stop.\n\n"
 

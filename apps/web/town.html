@@ -959,6 +959,45 @@
       object-fit: contain;
       image-rendering: pixelated;
     }
+    .bj-dealer {
+      position: absolute;
+      left: 50%;
+      top: 22%;
+      transform: translate(-50%, -50%);
+      width: 180px;
+      border: 1px solid var(--accent-gold);
+      background: rgba(9, 19, 34, 0.9);
+      padding: 6px 8px;
+      text-align: center;
+      z-index: 3;
+    }
+    .holdem-marker {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      margin-left: 4px;
+      border: 1px solid var(--accent-gold);
+      color: var(--accent-gold);
+      font-size: 10px;
+      padding: 1px 3px;
+      min-width: 18px;
+      background: rgba(255, 213, 107, 0.08);
+    }
+    .holdem-board-cards {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      display: inline-flex;
+      gap: 4px;
+      align-items: center;
+      justify-content: center;
+      z-index: 3;
+      min-height: 30px;
+      padding: 6px 8px;
+      border: 1px solid rgba(255, 213, 107, 0.4);
+      background: rgba(9, 19, 34, 0.72);
+    }
     @keyframes campfireFlicker {
       0%, 100% { transform: translate(-50%, -50%) scale(1); }
       50% { transform: translate(-50%, -50%) scale(1.05); }

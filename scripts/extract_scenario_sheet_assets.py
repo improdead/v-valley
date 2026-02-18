@@ -23,6 +23,7 @@ class SpriteCrop:
     bbox: tuple[int, int, int, int]  # inclusive x0,y0,x1,y1
     pad: int = 8
     tolerance: int = 26
+    required: bool = True
 
 
 def _top_border_palette(img: Image.Image, *, bucket: int = 8, top_n: int = 8) -> list[tuple[int, int, int]]:
@@ -115,9 +116,12 @@ def _trim_alpha(img: Image.Image, *, pad: int = 1) -> Image.Image:
     return img.crop((left, top, right, bottom))
 
 
-def _extract(src_root: Path, dst_root: Path, spec: SpriteCrop) -> Path:
+def _extract(src_root: Path, dst_root: Path, spec: SpriteCrop) -> Path | None:
     src_path = src_root / spec.src
     if not src_path.exists():
+        if not spec.required:
+            print(f"Skipping missing optional source: {src_path}")
+            return None
         raise FileNotFoundError(f"Missing source: {src_path}")
 
     image = Image.open(src_path).convert("RGBA")
@@ -321,6 +325,43 @@ def _specs() -> list[SpriteCrop]:
                 bbox=(332, 414, 594, 525),
                 pad=8,
                 tolerance=24,
+            ),
+        ]
+    )
+
+    out.extend(
+        [
+            SpriteCrop(
+                src="blackjack/icon.png",
+                dst="blackjack/icon.png",
+                bbox=(0, 0, 639, 639),
+                pad=0,
+                tolerance=26,
+                required=False,
+            ),
+            SpriteCrop(
+                src="blackjack/ui/actions_sheet.png",
+                dst="blackjack/ui/actions_sheet.png",
+                bbox=(0, 0, 639, 639),
+                pad=0,
+                tolerance=26,
+                required=False,
+            ),
+            SpriteCrop(
+                src="holdem/icon.png",
+                dst="holdem/icon.png",
+                bbox=(0, 0, 639, 639),
+                pad=0,
+                tolerance=26,
+                required=False,
+            ),
+            SpriteCrop(
+                src="holdem/ui/markers_sheet.png",
+                dst="holdem/ui/markers_sheet.png",
+                bbox=(0, 0, 639, 639),
+                pad=0,
+                tolerance=26,
+                required=False,
             ),
         ]
     )
@@ -550,10 +591,15 @@ def main() -> None:
 
     specs = _specs()
     written: list[Path] = []
+    skipped = 0
     for spec in specs:
-        written.append(_extract(src_root, out_root, spec))
+        dst = _extract(src_root, out_root, spec)
+        if dst is None:
+            skipped += 1
+            continue
+        written.append(dst)
 
-    print(f"Extracted {len(written)} sprites into {out_root}")
+    print(f"Extracted {len(written)} sprites into {out_root} ({skipped} optional skipped)")
     for path in written:
         print(path)
 

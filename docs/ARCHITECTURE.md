@@ -64,7 +64,7 @@ Each agent has an `AgentMemory` with four components:
 
 ### cognition.py — Cognition adapters
 
-`CognitionPlanner` provides methods for every cognitive task (23 methods, each with a deterministic heuristic fallback):
+`CognitionPlanner` provides methods for every cognitive task (26 methods, each with a deterministic heuristic fallback):
 
 | Method | Purpose |
 |--------|---------|
@@ -93,6 +93,9 @@ Each agent has an `AgentMemory` with four components:
 | `werewolf_choose_vote` | Pick day vote target in Werewolf |
 | `anaconda_choose_bet` | Bet/fold/all-in choice in Anaconda rounds |
 | `anaconda_choose_pass_cards` | Card passing choice in Anaconda pass rounds |
+| `blackjack_choose_bet` | Choose opening bet for tournament blackjack |
+| `blackjack_choose_action` | Choose hit/stand/double action in blackjack |
+| `holdem_choose_action` | Choose fixed-limit hold'em action (fold/check/call/raise) |
 
 The simulation never requires an LLM to function.
 
@@ -119,7 +122,7 @@ Each cognition task has its own policy controlling:
 - Timeout and retry limits
 - Prompt cache enablement
 
-31 task policies are defined by default, including scenario-specific decision tasks (`werewolf_*`, `anaconda_*`) in addition to baseline planning/retrieval scopes. Two presets are available:
+34 task policies are defined by default, including scenario-specific decision tasks (`werewolf_*`, `anaconda_*`, `blackjack_*`, `holdem_*`) in addition to baseline planning/retrieval scopes. Two presets are available:
 - `fun-low-cost` — routes everything to cheap/heuristic tiers
 - `situational-default` — mixed tiers based on task complexity
 
@@ -227,3 +230,5 @@ Active improvement documents extend this architecture:
 |----------|-------|
 | [Town Viewer Improvements](TOWN_VIEWER_IMPROVEMENTS.md) | Frontend: event feed, agent drawers, day/night cycle, bug fixes |
 | [Scenario Matchmaking Plan](SCENARIO_MATCHMAKING_PLAN.md) | Competitive scenarios: Werewolf, Poker, ELO, lobby system |
+| [Casino Mini-Games Plan](CASINO_MINIGAMES_PLAN.md) | Blackjack + Hold'em engine design, metadata contracts, queue/cleanup lifecycle |
+| [Casino Asset Prompts](CASINO_ASSET_PROMPTS.md) | Prompt-ready generation specs for new casino icons/sheets |

@@ -71,6 +71,39 @@ class ScenariosApiTests(unittest.TestCase):
         self.assertEqual(joined.status_code, 200)
         return payload
 
+    def _wallet_balance(self, agent: dict[str, str]) -> int:
+        wallet = self.client.get(
+            "/api/v1/scenarios/me/wallet",
+            headers={"Authorization": f"Bearer {agent['api_key']}"},
+        )
+        self.assertEqual(wallet.status_code, 200)
+        return int(wallet.json()["wallet"]["balance"])
+
+    def _tick_until_no_active_matches(self, town_id: str, *, max_ticks: int = 50) -> None:
+        for _ in range(max_ticks):
+            active = self.client.get(f"/api/v1/scenarios/towns/{town_id}/active")
+            self.assertEqual(active.status_code, 200)
+            if int(active.json().get("count") or 0) == 0:
+                return
+            tick = self.client.post(f"/api/v1/sim/towns/{town_id}/tick", json={"steps": 1})
+            self.assertEqual(tick.status_code, 200)
+
+    def test_scenarios_list_includes_blackjack_and_holdem(self) -> None:
+        resp = self.client.get("/api/v1/scenarios")
+        self.assertEqual(resp.status_code, 200)
+        scenarios = {item["scenario_key"]: item for item in resp.json().get("scenarios", [])}
+        self.assertIn("blackjack_tournament", scenarios)
+        self.assertIn("holdem_fixed_limit", scenarios)
+
+        blackjack_rules = scenarios["blackjack_tournament"].get("rules_json") or {}
+        holdem_rules = scenarios["holdem_fixed_limit"].get("rules_json") or {}
+        self.assertEqual(str(blackjack_rules.get("engine") or ""), "blackjack")
+        self.assertEqual(str(blackjack_rules.get("ui_group") or ""), "casino")
+        self.assertEqual(str(blackjack_rules.get("spectator_kind") or ""), "blackjack")
+        self.assertEqual(str(holdem_rules.get("engine") or ""), "holdem")
+        self.assertEqual(str(holdem_rules.get("ui_group") or ""), "casino")
+        self.assertEqual(str(holdem_rules.get("spectator_kind") or ""), "holdem")
+
     def test_werewolf_queue_match_and_cleanup(self) -> None:
         town_id = f"town-{uuid.uuid4().hex[:8]}"
         self._publish_town(town_id)
@@ -190,6 +223,165 @@ class ScenariosApiTests(unittest.TestCase):
 
         self.assertTrue(any(after > before for before, after in zip(before_balances, after_balances)))
         self.assertTrue(any(after < before for before, after in zip(before_balances, after_balances)))
+
+    def test_blackjack_queue_match_wallet_and_cleanup(self) -> None:
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+
+        roster = [
+            self._register_and_join(town_id, f"Blackjack-{i}", f"blackjack-owner-{i}")
+            for i in range(3)
+        ]
+
+        before_balances = [self._wallet_balance(agent) for agent in roster]
+        for agent in roster:
+            queued = self.client.post(
+                "/api/v1/scenarios/blackjack_tournament/queue/join",
+                headers={"Authorization": f"Bearer {agent['api_key']}"},
+            )
+            self.assertEqual(queued.status_code, 200)
+
+        self._tick_until_no_active_matches(town_id, max_ticks=60)
+
+        final_active = self.client.get(f"/api/v1/scenarios/towns/{town_id}/active")
+        self.assertEqual(final_active.status_code, 200)
+        self.assertEqual(int(final_active.json().get("count") or 0), 0)
+
+        after_balances = [self._wallet_balance(agent) for agent in roster]
+        self.assertTrue(any(before != after for before, after in zip(before_balances, after_balances)))
+
+        settled_state = self.client.get(f"/api/v1/sim/towns/{town_id}/state")
+        self.assertEqual(settled_state.status_code, 200)
+        settled_npcs = settled_state.json().get("state", {}).get("npcs", [])
+        self.assertTrue(all(not str(npc.get("status") or "").startswith("scenario_") for npc in settled_npcs))
+        self.assertTrue(all("scenario" not in npc for npc in settled_npcs))
+
+    def test_holdem_queue_match_wallet_and_cleanup(self) -> None:
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+
+        roster = [
+            self._register_and_join(town_id, f"Holdem-{i}", f"holdem-owner-{i}")
+            for i in range(3)
+        ]
+
+        before_balances = [self._wallet_balance(agent) for agent in roster]
+        for agent in roster:
+            queued = self.client.post(
+                "/api/v1/scenarios/holdem_fixed_limit/queue/join",
+                headers={"Authorization": f"Bearer {agent['api_key']}"},
+            )
+            self.assertEqual(queued.status_code, 200)
+
+        self._tick_until_no_active_matches(town_id, max_ticks=50)
+
+        final_active = self.client.get(f"/api/v1/scenarios/towns/{town_id}/active")
+        self.assertEqual(final_active.status_code, 200)
+        self.assertEqual(int(final_active.json().get("count") or 0), 0)
+
+        after_balances = [self._wallet_balance(agent) for agent in roster]
+        self.assertTrue(any(before != after for before, after in zip(before_balances, after_balances)))
+
+        settled_state = self.client.get(f"/api/v1/sim/towns/{town_id}/state")
+        self.assertEqual(settled_state.status_code, 200)
+        settled_npcs = settled_state.json().get("state", {}).get("npcs", [])
+        self.assertTrue(all(not str(npc.get("status") or "").startswith("scenario_") for npc in settled_npcs))
+        self.assertTrue(all("scenario" not in npc for npc in settled_npcs))
+
+    def test_servers_endpoint_labels_are_metadata_driven(self) -> None:
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+        roster = [
+            self._register_and_join(town_id, f"Server-{i}", f"server-owner-{i}")
+            for i in range(2)
+        ]
+
+        for agent in roster:
+            queued = self.client.post(
+                "/api/v1/scenarios/holdem_fixed_limit/queue/join",
+                headers={"Authorization": f"Bearer {agent['api_key']}"},
+            )
+            self.assertEqual(queued.status_code, 200)
+
+        servers = self.client.get("/api/v1/scenarios/servers")
+        self.assertEqual(servers.status_code, 200)
+        rows = servers.json().get("servers", [])
+        holdem_rows = [row for row in rows if str(row.get("scenario_key") or "") == "holdem_fixed_limit"]
+        self.assertGreaterEqual(len(holdem_rows), 1)
+        target = holdem_rows[0]
+        self.assertEqual(str(target.get("scenario_kind") or ""), "holdem")
+        self.assertEqual(str(target.get("scenario_category") or ""), "card_game")
+        self.assertEqual(str(target.get("ui_group") or ""), "casino")
+        self.assertIn("Texas Hold", str(target.get("scenario_name") or ""))
+
+    def test_spectate_payload_contains_blackjack_public_fields(self) -> None:
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+        roster = [
+            self._register_and_join(town_id, f"SpecBJ-{i}", f"spec-bj-owner-{i}")
+            for i in range(2)
+        ]
+        for agent in roster:
+            queued = self.client.post(
+                "/api/v1/scenarios/blackjack_tournament/queue/join",
+                headers={"Authorization": f"Bearer {agent['api_key']}"},
+            )
+            self.assertEqual(queued.status_code, 200)
+
+        me_match = self.client.get(
+            "/api/v1/scenarios/me/match",
+            headers={"Authorization": f"Bearer {roster[0]['api_key']}"},
+        )
+        self.assertEqual(me_match.status_code, 200)
+        match_id = str(me_match.json().get("match", {}).get("match_id") or "")
+        self.assertTrue(match_id)
+
+        spectate = self.client.get(f"/api/v1/scenarios/matches/{match_id}/spectate")
+        self.assertEqual(spectate.status_code, 200)
+        public_state = spectate.json().get("public_state", {})
+        self.assertEqual(str(public_state.get("scenario_kind") or ""), "blackjack")
+        self.assertIn("Blackjack", str(public_state.get("scenario_name") or ""))
+        blackjack = public_state.get("blackjack") or {}
+        self.assertIn("dealer_cards", blackjack)
+        self.assertIn("dealer_upcard", blackjack)
+        self.assertIn("player_hands", blackjack)
+        self.assertIn("player_bets", blackjack)
+        self.assertIn("hand_results", blackjack)
+
+    def test_spectate_payload_contains_holdem_public_fields(self) -> None:
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+        roster = [
+            self._register_and_join(town_id, f"SpecHE-{i}", f"spec-he-owner-{i}")
+            for i in range(2)
+        ]
+        for agent in roster:
+            queued = self.client.post(
+                "/api/v1/scenarios/holdem_fixed_limit/queue/join",
+                headers={"Authorization": f"Bearer {agent['api_key']}"},
+            )
+            self.assertEqual(queued.status_code, 200)
+
+        me_match = self.client.get(
+            "/api/v1/scenarios/me/match",
+            headers={"Authorization": f"Bearer {roster[0]['api_key']}"},
+        )
+        self.assertEqual(me_match.status_code, 200)
+        match_id = str(me_match.json().get("match", {}).get("match_id") or "")
+        self.assertTrue(match_id)
+
+        spectate = self.client.get(f"/api/v1/scenarios/matches/{match_id}/spectate")
+        self.assertEqual(spectate.status_code, 200)
+        public_state = spectate.json().get("public_state", {})
+        self.assertEqual(str(public_state.get("scenario_kind") or ""), "holdem")
+        self.assertIn("Hold", str(public_state.get("scenario_name") or ""))
+        holdem = public_state.get("holdem") or {}
+        self.assertIn("board_cards", holdem)
+        self.assertIn("hole_cards", holdem)
+        self.assertIn("button_agent_id", holdem)
+        self.assertIn("small_blind_agent_id", holdem)
+        self.assertIn("big_blind_agent_id", holdem)
+        self.assertIn("current_bet", holdem)
 
     def test_anaconda_forfeit_endpoint_resolves_match(self) -> None:
         town_id = f"town-{uuid.uuid4().hex[:8]}"
@@ -413,6 +605,43 @@ class ScenariosApiTests(unittest.TestCase):
         self.assertGreaterEqual(active_after_two.json().get("count", 0), 1)
         match_after_two = active_after_two.json()["matches"][0]
         self.assertEqual(str(match_after_two.get("status") or ""), "active")
+
+    def test_manual_advance_uses_town_step_baseline(self) -> None:
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+        roster = [
+            self._register_and_join(town_id, f"ManualAdvance-{i}", f"manual-owner-{i}")
+            for i in range(3)
+        ]
+
+        for _ in range(10):
+            tick = self.client.post(f"/api/v1/sim/towns/{town_id}/tick", json={"steps": 1})
+            self.assertEqual(tick.status_code, 200)
+
+        for agent in roster:
+            queued = self.client.post(
+                "/api/v1/scenarios/anaconda_standard/queue/join",
+                headers={"Authorization": f"Bearer {agent['api_key']}"},
+            )
+            self.assertEqual(queued.status_code, 200)
+
+        active_before = self.client.get(f"/api/v1/scenarios/towns/{town_id}/active")
+        self.assertEqual(active_before.status_code, 200)
+        self.assertGreaterEqual(active_before.json().get("count", 0), 1)
+        match_before = active_before.json()["matches"][0]
+        self.assertEqual(str(match_before.get("status") or ""), "warmup")
+
+        advanced = self.client.post(f"/api/v1/scenarios/towns/{town_id}/advance?steps=2")
+        self.assertEqual(advanced.status_code, 200)
+        payload = advanced.json()
+        self.assertGreaterEqual(int(payload.get("from_step") or 0), 10)
+        self.assertEqual(int(payload.get("advanced_steps") or 0), 2)
+
+        active_after = self.client.get(f"/api/v1/scenarios/towns/{town_id}/active")
+        self.assertEqual(active_after.status_code, 200)
+        self.assertGreaterEqual(active_after.json().get("count", 0), 1)
+        match_after = active_after.json()["matches"][0]
+        self.assertEqual(str(match_after.get("status") or ""), "active")
 
 
 if __name__ == "__main__":

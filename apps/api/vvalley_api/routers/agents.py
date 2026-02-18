@@ -132,6 +132,11 @@ def _admin_handles() -> set[str]:
     )
 
 
+def _debug_mode() -> bool:
+    raw = os.environ.get("VVALLEY_DEBUG_MODE", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 class RegisterAgentRequest(BaseModel):
     name: str = Field(default="", max_length=80)
     description: Optional[str] = None
@@ -204,9 +209,9 @@ def register_agent_endpoint(req: RegisterAgentRequest, request: Request) -> dict
     if not _register_limiter.check(client_ip):
         raise HTTPException(status_code=429, detail="Too many registrations. Try again later.")
 
-    # --- one agent per owner (admin handles exempt) ---
+    # --- one agent per owner (admin handles and debug mode exempt) ---
     owner = (req.owner_handle or "").strip()
-    if owner and owner.lower() not in _admin_handles():
+    if owner and owner.lower() not in _admin_handles() and not _debug_mode():
         existing = count_agents_by_owner(owner)
         if existing > 0:
             raise HTTPException(
@@ -646,6 +651,71 @@ def leave_town(authorization: Optional[str] = Header(default=None)) -> dict[str,
             "claimed": bool(agent.get("claimed", False)),
             "current_town": None,
         },
+    }
+
+
+class BatchRegisterRequest(BaseModel):
+    count: int = Field(ge=2, le=50)
+    owner_handle: str = Field(min_length=1, max_length=80)
+    town_id: Optional[str] = None
+    name_prefix: str = Field(default="Debug", max_length=40)
+
+
+@router.post("/debug/batch-register")
+def batch_register(req: BatchRegisterRequest) -> dict[str, Any]:
+    if not _debug_mode():
+        raise HTTPException(status_code=403, detail="Debug mode is not enabled (set VVALLEY_DEBUG_MODE=true)")
+
+    logger.info("[DEBUG] Batch registering %d agents for owner='%s'", req.count, req.owner_handle)
+
+    created: list[dict[str, Any]] = []
+    for i in range(req.count):
+        name = f"{req.name_prefix}-{i + 1}"
+        sprite_name = CHARACTER_SPRITES[i % len(CHARACTER_SPRITES)]
+
+        agent = register_agent(
+            name=name,
+            description=f"Debug agent {i + 1} (batch-registered for testing)",
+            personality=None,
+            sprite_name=sprite_name,
+        )
+
+        # Auto-claim
+        claimed = claim_agent(
+            claim_token=agent["claim_token"],
+            verification_code=agent["verification_code"],
+            owner_handle=req.owner_handle,
+        )
+        if claimed:
+            agent.update(claimed)
+
+        agent_record = {
+            "id": agent["id"],
+            "name": name,
+            "api_key": agent["api_key"],
+            "sprite_name": sprite_name,
+        }
+
+        # Join town if specified
+        if req.town_id:
+            try:
+                membership = join_agent_town(agent_id=agent["id"], town_id=req.town_id)
+                if membership:
+                    agent_record["town_id"] = req.town_id
+                    agent_record["joined"] = True
+            except Exception as e:
+                agent_record["join_error"] = str(e)
+
+        created.append(agent_record)
+
+    logger.info("[DEBUG] Batch registered %d agents successfully", len(created))
+    return {
+        "ok": True,
+        "debug_mode": True,
+        "count": len(created),
+        "owner_handle": req.owner_handle,
+        "town_id": req.town_id,
+        "agents": created,
     }
 
 

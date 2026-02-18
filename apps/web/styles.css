@@ -728,6 +728,21 @@ input[type="checkbox"] {
   color: var(--ink-muted);
 }
 
+.scenario-group {
+  margin-top: 0.8rem;
+}
+
+.scenario-group-title {
+  margin: 0 0 0.2rem;
+  color: var(--wood-dark);
+}
+
+.scenario-group-subtitle {
+  margin: 0 0 0.45rem;
+  color: var(--ink-muted);
+  font-size: 0.98rem;
+}
+
 @keyframes badgePulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.75; }

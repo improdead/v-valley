@@ -86,6 +86,38 @@ function ratingTier(rating) {
   return { label: "Starter", cls: "tier-starter", icon: "assets/scenarios/processed/shared/frames/badge_starter.png" };
 }
 
+function scenarioRules(scenario) {
+  return scenario && typeof scenario.rules_json === "object" && scenario.rules_json ? scenario.rules_json : {};
+}
+
+function scenarioKindFromMeta(scenarioLike) {
+  const rules = scenarioRules(scenarioLike);
+  const configured = String(rules.engine || scenarioLike?.scenario_kind || "").trim().toLowerCase();
+  if (configured) return configured;
+  const key = String(scenarioLike?.scenario_key || "").toLowerCase();
+  if (key.includes("werewolf")) return "werewolf";
+  if (key.includes("blackjack")) return "blackjack";
+  if (key.includes("holdem") || key.includes("hold'em")) return "holdem";
+  if (key.includes("anaconda")) return "anaconda";
+  return "scenario";
+}
+
+function scenarioUiGroupFromMeta(scenarioLike) {
+  const rules = scenarioRules(scenarioLike);
+  const configured = String(rules.ui_group || scenarioLike?.ui_group || "").trim().toLowerCase();
+  if (configured) return configured;
+  return scenarioKindFromMeta(scenarioLike) === "werewolf" ? "social" : "casino";
+}
+
+function scenarioLabelFromKind(kind) {
+  const normalized = String(kind || "").toLowerCase();
+  if (normalized === "werewolf") return "Werewolf";
+  if (normalized === "anaconda") return "Anaconda";
+  if (normalized === "blackjack") return "Blackjack";
+  if (normalized === "holdem") return "Hold'em";
+  return "Scenario";
+}
+
 function guessDefaultApiBase() {
   if (window.location.port === "8080") {
     return `${window.location.protocol}//${window.location.host}`;
@@ -384,44 +416,81 @@ async function refreshScenarios() {
     const scenarios = Array.isArray(payload.scenarios) ? payload.scenarios : [];
     scenarioCardsContainer.innerHTML = "";
 
-    for (const scenario of scenarios) {
-      let queueStatus = null;
-      try {
-        queueStatus = await apiJson(`/api/v1/scenarios/${encodeURIComponent(scenario.scenario_key)}/queue/status`);
-      } catch {
-        queueStatus = null;
+    const grouped = {
+      social: [],
+      casino: [],
+      other: [],
+    };
+    scenarios.forEach((scenario) => {
+      const group = scenarioUiGroupFromMeta(scenario);
+      if (group === "social") grouped.social.push(scenario);
+      else if (group === "casino") grouped.casino.push(scenario);
+      else grouped.other.push(scenario);
+    });
+
+    const groupSpecs = [
+      { key: "social", title: "Social Deduction", subtitle: "Hidden roles and social strategy." },
+      { key: "casino", title: "Mini-Games / Casino", subtitle: "Fake-money betting and ranked competition." },
+      { key: "other", title: "Other Scenarios", subtitle: "Additional game modes." },
+    ];
+
+    for (const group of groupSpecs) {
+      const entries = grouped[group.key] || [];
+      if (!entries.length) continue;
+      const wrapper = document.createElement("section");
+      wrapper.className = "scenario-group";
+      wrapper.innerHTML = `
+        <h4 class="scenario-group-title">${group.title}</h4>
+        <p class="scenario-group-subtitle">${group.subtitle}</p>
+      `;
+      const grid = document.createElement("div");
+      grid.className = "town-grid";
+
+      for (const scenario of entries) {
+        let queueStatus = null;
+        try {
+          queueStatus = await apiJson(`/api/v1/scenarios/${encodeURIComponent(scenario.scenario_key)}/queue/status`);
+        } catch {
+          queueStatus = null;
+        }
+
+        const kind = scenarioKindFromMeta(scenario);
+        const kindLabel = scenarioLabelFromKind(kind);
+        const card = document.createElement("article");
+        card.className = "town-card town-card-live";
+        const minPlayers = Number(scenario.min_players || 0);
+        const maxPlayers = Number(scenario.max_players || 0);
+        const queued = Number(queueStatus?.queued || 0);
+        const buyIn = Number(scenario.buy_in || 0);
+        const category = String(scenario.category || "").replace(/_/g, " ");
+
+        card.innerHTML = `
+          <h3>${scenario.name || scenario.scenario_key}</h3>
+          <p>${kindLabel}${category ? ` · ${category}` : ""}</p>
+          <p>${minPlayers}-${maxPlayers} players · ${queued} queued</p>
+          <div class="town-card-meta">
+            <span class="badge ${queued >= minPlayers ? "badge-open" : "badge-full"}">${queued >= minPlayers ? "Ready Soon" : "Waiting"}</span>
+            <span class="badge">${buyIn > 0 ? `${buyIn} buy-in` : "No buy-in"}</span>
+          </div>
+          <div class="row-inline">
+            <button class="btn btn-small" data-join="${scenario.scenario_key}">Join Queue</button>
+            <button class="btn btn-small btn-ghost" data-leave="${scenario.scenario_key}">Leave Queue</button>
+          </div>
+        `;
+
+        card.querySelector("[data-join]")?.addEventListener("click", (event) => {
+          event.stopPropagation();
+          joinScenarioQueue(scenario.scenario_key);
+        });
+        card.querySelector("[data-leave]")?.addEventListener("click", (event) => {
+          event.stopPropagation();
+          leaveScenarioQueue(scenario.scenario_key);
+        });
+        grid.appendChild(card);
       }
 
-      const card = document.createElement("article");
-      card.className = "town-card town-card-live";
-      const minPlayers = Number(scenario.min_players || 0);
-      const maxPlayers = Number(scenario.max_players || 0);
-      const queued = Number(queueStatus?.queued || 0);
-      const buyIn = Number(scenario.buy_in || 0);
-
-      card.innerHTML = `
-        <h3>${scenario.name || scenario.scenario_key}</h3>
-        <p>${minPlayers}-${maxPlayers} players · ${queued} queued</p>
-        <div class="town-card-meta">
-          <span class="badge ${queued >= minPlayers ? "badge-open" : "badge-full"}">${queued >= minPlayers ? "Ready Soon" : "Waiting"}</span>
-          <span class="badge">${buyIn > 0 ? `${buyIn} buy-in` : "No buy-in"}</span>
-        </div>
-        <div class="row-inline">
-          <button class="btn btn-small" data-join="${scenario.scenario_key}">Join Queue</button>
-          <button class="btn btn-small btn-ghost" data-leave="${scenario.scenario_key}">Leave Queue</button>
-        </div>
-      `;
-
-      card.querySelector("[data-join]")?.addEventListener("click", (event) => {
-        event.stopPropagation();
-        joinScenarioQueue(scenario.scenario_key);
-      });
-      card.querySelector("[data-leave]")?.addEventListener("click", (event) => {
-        event.stopPropagation();
-        leaveScenarioQueue(scenario.scenario_key);
-      });
-
-      scenarioCardsContainer.appendChild(card);
+      wrapper.appendChild(grid);
+      scenarioCardsContainer.appendChild(wrapper);
     }
 
     await refreshScenarioServers();
@@ -453,13 +522,16 @@ async function refreshScenarioServers() {
     servers.forEach((server) => {
       const card = document.createElement("article");
       card.className = "town-card town-card-live";
-      const scenarioLabel = String(server.scenario_key || "").includes("werewolf") ? "Werewolf" : "Anaconda";
+      const kind = scenarioKindFromMeta(server);
+      const scenarioLabel = scenarioLabelFromKind(kind);
+      const scenarioName = String(server.scenario_name || scenarioLabel || server.scenario_key || "Scenario");
       const townId = String(server.town_id || "");
       const watchUrl = `./town.html?api=${encodeURIComponent(base)}&town=${encodeURIComponent(townId)}`;
       card.innerHTML = `
-        <h3>${scenarioLabel} · ${townId || "town"}</h3>
+        <h3>${scenarioName} · ${townId || "town"}</h3>
         <p>${Number(server.participant_count || 0)} players · ${server.phase || "warmup"}</p>
         <div class="town-card-meta">
+          <span class="badge">${scenarioLabel}</span>
           <span class="badge">${server.match_id || ""}</span>
           <span class="badge">${Number(server.pot || 0)} pot</span>
         </div>

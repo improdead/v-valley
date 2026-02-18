@@ -317,6 +317,30 @@ _JSON_SCHEMA_TASKS: dict[str, dict[str, Any]] = {
         "required": ["attitude", "relationship_delta"],
         "additionalProperties": False,
     },
+    "blackjack_bet": {
+        "type": "object",
+        "properties": {
+            "bet": {"type": "integer", "minimum": 0},
+        },
+        "required": ["bet"],
+        "additionalProperties": False,
+    },
+    "blackjack_action": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["hit", "stand", "double"]},
+        },
+        "required": ["action"],
+        "additionalProperties": False,
+    },
+    "holdem_action": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["fold", "check", "call", "raise"]},
+        },
+        "required": ["action"],
+        "additionalProperties": False,
+    },
 }
 
 
@@ -773,6 +797,24 @@ _TASK_PROMPTS: dict[str, tuple[str, str]] = {
         "toward the partner and a relationship score delta from this interaction. Return JSON.",
         "Assess this conversation outcome.\n"
         "Output: JSON with attitude and relationship_delta (float between -3 and 3).\n\n",
+    ),
+    "blackjack_bet": (
+        "You are a V-Valley blackjack tournament betting advisor. Choose a legal opening bet amount "
+        "for this hand given the current stack and table limits. Return JSON.",
+        "Pick an opening blackjack bet that is valid for the player's stack and min/max table limits.\n"
+        "Output: JSON with bet (integer).\n\n",
+    ),
+    "blackjack_action": (
+        "You are a V-Valley blackjack action advisor. Choose one legal action for the current hand. "
+        "Allowed actions are hit, stand, and optionally double. Return JSON.",
+        "Choose one action for this blackjack turn.\n"
+        "Output: JSON with action ('hit'|'stand'|'double').\n\n",
+    ),
+    "holdem_action": (
+        "You are a V-Valley fixed-limit hold'em action advisor. Choose one legal action for this player "
+        "using the current pot, board, stack, and to-call context. Return JSON.",
+        "Choose one fixed-limit hold'em action.\n"
+        "Output: JSON with action ('fold'|'check'|'call'|'raise').\n\n",
     ),
 }
 

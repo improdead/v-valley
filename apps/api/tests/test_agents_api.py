@@ -541,6 +541,99 @@ class ConstraintTests(unittest.TestCase):
         self.assertEqual(len(set(sprites)), 2, f"Expected 2 unique sprites, got {sprites}")
 
 
+class DebugModeBatchRegisterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        os.environ["VVALLEY_DB_PATH"] = str(TEST_DB_PATH)
+        self._prev_debug_mode = os.environ.get("VVALLEY_DEBUG_MODE")
+        self._prev_admin_handles = os.environ.get("VVALLEY_ADMIN_HANDLES")
+        os.environ.pop("VVALLEY_DEBUG_MODE", None)
+        os.environ.pop("VVALLEY_ADMIN_HANDLES", None)
+        if TEST_DB_PATH.exists():
+            TEST_DB_PATH.unlink()
+        reset_agents_backend()
+        reset_maps_backend()
+        reset_llm_backend()
+        reset_runtime_backend()
+        reset_interaction_backend()
+        reset_scenarios_backend()
+        reset_rate_limiter()
+        self.client = TestClient(app)
+
+    def tearDown(self) -> None:
+        if self._prev_debug_mode is None:
+            os.environ.pop("VVALLEY_DEBUG_MODE", None)
+        else:
+            os.environ["VVALLEY_DEBUG_MODE"] = self._prev_debug_mode
+
+        if self._prev_admin_handles is None:
+            os.environ.pop("VVALLEY_ADMIN_HANDLES", None)
+        else:
+            os.environ["VVALLEY_ADMIN_HANDLES"] = self._prev_admin_handles
+
+    def _publish_town(self, town_id: str) -> None:
+        resp = self.client.post(
+            "/api/v1/maps/publish-version",
+            json={
+                "town_id": town_id,
+                "map_path": "assets/templates/starter_town/map.json",
+                "map_name": "starter",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+
+    def test_batch_register_requires_debug_mode(self) -> None:
+        resp = self.client.post(
+            "/api/v1/agents/debug/batch-register",
+            json={"count": 2, "owner_handle": "debug-test"},
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("Debug mode is not enabled", str(resp.json().get("detail") or ""))
+
+    def test_debug_mode_allows_multiple_agents_for_same_owner(self) -> None:
+        os.environ["VVALLEY_DEBUG_MODE"] = "true"
+
+        first = self.client.post(
+            "/api/v1/agents/register",
+            json={"name": "Debug 1", "owner_handle": "shared-owner", "auto_claim": True},
+        )
+        self.assertEqual(first.status_code, 200)
+
+        second = self.client.post(
+            "/api/v1/agents/register",
+            json={"name": "Debug 2", "owner_handle": "shared-owner", "auto_claim": True},
+        )
+        self.assertEqual(second.status_code, 200)
+
+    def test_batch_register_creates_and_joins_agents(self) -> None:
+        os.environ["VVALLEY_DEBUG_MODE"] = "true"
+        town_id = f"town-{uuid.uuid4().hex[:8]}"
+        self._publish_town(town_id)
+
+        resp = self.client.post(
+            "/api/v1/agents/debug/batch-register",
+            json={
+                "count": 3,
+                "owner_handle": "debug-owner",
+                "town_id": town_id,
+                "name_prefix": "Wolf",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertTrue(bool(payload.get("ok")))
+        self.assertTrue(bool(payload.get("debug_mode")))
+        self.assertEqual(int(payload.get("count") or 0), 3)
+        self.assertEqual(str(payload.get("town_id") or ""), town_id)
+        agents = payload.get("agents") or []
+        self.assertEqual(len(agents), 3)
+
+        for idx, agent in enumerate(agents, start=1):
+            self.assertEqual(str(agent.get("name") or ""), f"Wolf-{idx}")
+            self.assertTrue(str(agent.get("api_key") or "").startswith("vvalley_sk_"))
+            self.assertTrue(bool(agent.get("joined")))
+            self.assertEqual(str(agent.get("town_id") or ""), town_id)
+
+
 class GAFeatureGapTests(unittest.TestCase):
     """Tests for GA feature gap closures: ISS, pronunciatio, spatial metadata, etc."""
 

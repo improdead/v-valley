@@ -632,7 +632,7 @@
     nextMatchIds.forEach((matchId) => {
       if (!knownMatchIds.has(matchId)) {
         const m = (matches || []).find((item) => String(item.match_id) === matchId);
-        const label = m?.scenario_key?.includes("werewolf") ? "Werewolf" : "Anaconda";
+        const label = scenarioDisplayName(m);
         events.push({
           type: "goal",
           emoji: "🎮",
@@ -1220,8 +1220,9 @@
 
     $matchList.innerHTML = matches
       .map((match) => {
-        const scenarioLabel = String(match.scenario_key || "").includes("werewolf") ? "🐺 Werewolf" : "🃏 Anaconda";
-        const meta = String(match.scenario_key || "").includes("anaconda")
+        const kind = scenarioKindFromState(match);
+        const scenarioLabel = `🎮 ${scenarioDisplayName(match)}`;
+        const meta = (kind === "anaconda" || kind === "holdem" || kind === "blackjack")
           ? `Pot ${Number(match.pot || 0)} · ${Number(match.participant_count || 0)} players`
           : `${Number(match.participant_count || 0)} players · round ${Number(match.round_number || 0)}`;
         return `
@@ -1296,11 +1297,26 @@
     if ($matchModal) $matchModal.style.display = "none";
   }
 
-  function scenarioKindFromKey(key) {
-    const raw = String(key || "").toLowerCase();
+  function scenarioKindFromState(value) {
+    const explicit = String(value?.scenario_kind || "").toLowerCase();
+    if (explicit) return explicit;
+    const raw = String(typeof value === "string" ? value : (value?.scenario_key || "")).toLowerCase();
     if (raw.includes("werewolf")) return "werewolf";
+    if (raw.includes("blackjack")) return "blackjack";
+    if (raw.includes("holdem") || raw.includes("hold'em")) return "holdem";
     if (raw.includes("anaconda")) return "anaconda";
     return "generic";
+  }
+
+  function scenarioDisplayName(value) {
+    const explicit = String(value?.scenario_name || "").trim();
+    if (explicit) return explicit;
+    const kind = scenarioKindFromState(value);
+    if (kind === "werewolf") return "Werewolf";
+    if (kind === "anaconda") return "Anaconda";
+    if (kind === "blackjack") return "Blackjack";
+    if (kind === "holdem") return "Hold'em";
+    return "Scenario";
   }
 
   function currentMatchFrame() {
@@ -1339,7 +1355,26 @@
 
   function renderMatchVoteTracker(state, events) {
     if (!$matchVoteTracker) return;
-    const kind = scenarioKindFromKey(state?.scenario_key);
+    const kind = scenarioKindFromState(state);
+    if (kind === "blackjack") {
+      const bj = state?.blackjack || {};
+      const dealerUp = String(bj.dealer_upcard || (bj.dealer_cards || [])[0] || "--");
+      $matchVoteTracker.innerHTML = `
+        <div class="match-vote-row">Hand: ${Number(bj.current_hand_index || 1)}/${Number(bj.max_hands || 1)}</div>
+        <div class="match-vote-row">Dealer upcard: ${escapeHtml(dealerUp)}</div>
+        <div class="match-vote-row"><img class="match-vote-icon" src="${anacondaChipAsset(state?.pot || 0)}" alt="chips" />Pot: ${Number(state?.pot || 0)}</div>
+      `;
+      return;
+    }
+    if (kind === "holdem") {
+      const hold = state?.holdem || {};
+      $matchVoteTracker.innerHTML = `
+        <div class="match-vote-row">Board cards: ${Number((hold.board_cards || []).length || 0)}</div>
+        <div class="match-vote-row">Current bet: ${Number(hold.current_bet || 0)}</div>
+        <div class="match-vote-row"><img class="match-vote-icon" src="${anacondaChipAsset(state?.pot || 0)}" alt="chips" />Pot: ${Number(state?.pot || 0)}</div>
+      `;
+      return;
+    }
     if (kind !== "werewolf") {
       const pot = Number(state?.pot || 0);
       const folded = (state?.folded_agent_ids || []).length;
@@ -1556,6 +1591,113 @@
     `;
   }
 
+  function holdemHoleToken(card) {
+    const raw = String(card || "").trim().toUpperCase();
+    if (!raw || raw === "??") {
+      return `<img class="ana-card-back" src="${scenarioArtRoot}/anaconda/cards/card_back.png" alt="hidden card" />`;
+    }
+    return anacondaCardToken(raw);
+  }
+
+  function renderBlackjackBoard(state) {
+    if (!$matchModalBoard) return;
+    const participants = state?.participants || [];
+    const seats = seatCirclePositions(participants.length);
+    const bj = state?.blackjack || {};
+    const hands = bj.player_hands || {};
+    const bets = bj.player_bets || {};
+    const dealerCards = Array.isArray(bj.dealer_cards) ? bj.dealer_cards : [];
+    const dealerTotal = dealerCards.filter((c) => c !== "??").length
+      ? dealerCards.filter((c) => c !== "??").map((c) => String(c || "")).length
+      : 0;
+    const cardsHtml = participants
+      .map((p, idx) => {
+        const aid = String(p.agent_id || "");
+        const pos = seats[idx] || { left: 50, top: 50 };
+        const chips = p.chips_end != null ? Number(p.chips_end) : Number(p.chips || 0);
+        const hand = Array.isArray(hands[aid]) ? hands[aid] : [];
+        const rendered = hand.length
+          ? hand.map((card) => (String(card || "").toUpperCase() === "??"
+            ? `<img class="ana-card-back" src="${scenarioArtRoot}/anaconda/cards/card_back.png" alt="hidden card" />`
+            : anacondaCardToken(card))).join("")
+          : `<img class="ana-card-back" src="${scenarioArtRoot}/anaconda/cards/card_back.png" alt="hidden card" /><img class="ana-card-back" src="${scenarioArtRoot}/anaconda/cards/card_back.png" alt="hidden card" />`;
+        return `
+          <div class="ana-seat" style="left:${pos.left}%;top:${pos.top}%;">
+            <div class="ana-name">${escapeHtml(npcName(aid))}</div>
+            <div class="ana-cards"><span class="ana-revealed-cards">${rendered}</span></div>
+            <div class="ana-chips"><img class="ana-chip-icon" src="${anacondaChipAsset(chips)}" alt="chips" />${chips} · bet ${Number(bets[aid] || 0)}</div>
+          </div>
+        `;
+      })
+      .join("");
+
+    const dealerRendered = dealerCards.length
+      ? dealerCards.map((card) => (String(card || "").toUpperCase() === "??"
+        ? `<img class="ana-card-back" src="${scenarioArtRoot}/anaconda/cards/card_back.png" alt="hidden card" />`
+        : anacondaCardToken(card))).join("")
+      : `<img class="ana-card-back" src="${scenarioArtRoot}/anaconda/cards/card_back.png" alt="hidden card" /><img class="ana-card-back" src="${scenarioArtRoot}/anaconda/cards/card_back.png" alt="hidden card" />`;
+
+    $matchModalBoard.innerHTML = `
+      <div class="scenario-board anaconda-board">
+        <img class="ana-table-art" src="${scenarioArtRoot}/anaconda/board/poker_table.png" alt="table" />
+        <img class="ana-phase-art" src="${scenarioArtRoot}/blackjack/ui/actions_sheet.png" alt="blackjack actions" onerror="this.onerror=null;this.src='${scenarioArtRoot}/anaconda/ui/button_call.png';" />
+        <img class="ana-ranks-art" src="${scenarioArtRoot}/blackjack/icon.png" alt="blackjack icon" onerror="this.onerror=null;this.src='${scenarioArtRoot}/anaconda/icon.png';" />
+        <div class="ana-pot"><img src="${anacondaChipAsset(state?.pot || 0)}" alt="chips" />Pot ${Number(state?.pot || 0)}</div>
+        <div class="ana-phase">${escapeHtml(`HAND ${Number(bj.current_hand_index || 1)}/${Number(bj.max_hands || 1)}`)}</div>
+        <div class="bj-dealer">
+          <div class="ana-name">Dealer</div>
+          <div class="ana-cards"><span class="ana-revealed-cards">${dealerRendered}</span></div>
+          <div class="ana-chips">cards ${dealerCards.length}${dealerTotal ? ` · showing` : ""}</div>
+        </div>
+        ${cardsHtml}
+      </div>
+    `;
+  }
+
+  function renderHoldemBoard(state) {
+    if (!$matchModalBoard) return;
+    const participants = state?.participants || [];
+    const seats = seatCirclePositions(participants.length);
+    const holdem = state?.holdem || {};
+    const holeCards = holdem.hole_cards || {};
+    const boardCards = Array.isArray(holdem.board_cards) ? holdem.board_cards : [];
+    const dealerId = String(holdem.button_agent_id || "");
+    const smallBlindId = String(holdem.small_blind_agent_id || "");
+    const bigBlindId = String(holdem.big_blind_agent_id || "");
+
+    const cardsHtml = participants
+      .map((p, idx) => {
+        const aid = String(p.agent_id || "");
+        const pos = seats[idx] || { left: 50, top: 50 };
+        const chips = p.chips_end != null ? Number(p.chips_end) : Number(p.chips || 0);
+        const hand = Array.isArray(holeCards[aid]) ? holeCards[aid] : ["??", "??"];
+        const marker = aid === dealerId ? "D" : (aid === smallBlindId ? "SB" : (aid === bigBlindId ? "BB" : ""));
+        return `
+          <div class="ana-seat ${String(p.status || "").toLowerCase().includes("fold") ? "folded" : ""}" style="left:${pos.left}%;top:${pos.top}%;">
+            <div class="ana-name">${escapeHtml(npcName(aid))} ${marker ? `<span class="holdem-marker">${marker}</span>` : ""}</div>
+            <div class="ana-cards"><span class="ana-revealed-cards">${hand.slice(0, 2).map((card) => holdemHoleToken(card)).join("")}</span></div>
+            <div class="ana-chips"><img class="ana-chip-icon" src="${anacondaChipAsset(chips)}" alt="chips" />${chips}</div>
+          </div>
+        `;
+      })
+      .join("");
+    const boardTokens = boardCards.length
+      ? boardCards.map((card) => anacondaCardToken(card)).join("")
+      : `<img class="ana-card-back" src="${scenarioArtRoot}/anaconda/cards/card_back.png" alt="hidden board" /><img class="ana-card-back" src="${scenarioArtRoot}/anaconda/cards/card_back.png" alt="hidden board" /><img class="ana-card-back" src="${scenarioArtRoot}/anaconda/cards/card_back.png" alt="hidden board" />`;
+
+    $matchModalBoard.innerHTML = `
+      <div class="scenario-board anaconda-board">
+        <img class="ana-table-art" src="${scenarioArtRoot}/anaconda/board/poker_table.png" alt="table" />
+        <img class="ana-phase-art" src="${scenarioArtRoot}/holdem/ui/markers_sheet.png" alt="holdem markers" onerror="this.onerror=null;this.src='${scenarioArtRoot}/shared/frames/badge_silver.png';" />
+        <img class="ana-ranks-art" src="${scenarioArtRoot}/holdem/icon.png" alt="holdem icon" onerror="this.onerror=null;this.src='${scenarioArtRoot}/anaconda/icon.png';" />
+        <div class="ana-pot"><img src="${anacondaChipAsset(state?.pot || 0)}" alt="chips" />Pot ${Number(state?.pot || 0)}</div>
+        <div class="ana-phase">${escapeHtml(String(state?.phase || "").toUpperCase())}</div>
+        <div class="holdem-board-cards">${boardTokens}</div>
+        ${cardsHtml}
+      </div>
+    `;
+  }
+
   function showMatchSceneBanner(text) {
     if (!$matchSceneBanner) return;
     $matchSceneBanner.textContent = text;
@@ -1567,9 +1709,11 @@
   }
 
   function renderMatchBoard(state, events) {
-    const kind = scenarioKindFromKey(state?.scenario_key);
+    const kind = scenarioKindFromState(state);
     if (kind === "werewolf") renderWerewolfBoard(state, events);
     else if (kind === "anaconda") renderAnacondaBoard(state);
+    else if (kind === "blackjack") renderBlackjackBoard(state);
+    else if (kind === "holdem") renderHoldemBoard(state);
     else if ($matchModalBoard) {
       $matchModalBoard.innerHTML = '<div class="empty-state"><p>No dedicated scene for this match type.</p></div>';
     }
@@ -1692,7 +1836,7 @@
   function renderSpectatorFrame(frame) {
     const state = frame?.public_state || {};
     const events = frame?.recent_events || [];
-    const scenarioLabel = scenarioKindFromKey(state?.scenario_key) === "werewolf" ? "Werewolf" : "Anaconda";
+    const scenarioLabel = scenarioDisplayName(state);
     if ($matchModalTitle) {
       $matchModalTitle.textContent = `${scenarioLabel} · ${state.match_id || ""}`;
     }

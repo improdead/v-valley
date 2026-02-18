@@ -248,11 +248,29 @@ def list_servers(town_id: Optional[str] = Query(default=None)) -> dict[str, Any]
     for match in raw:
         participants = scenario_store.list_match_participants(match_id=str(match.get("match_id") or ""))
         scenario = scenario_store.get_scenario(scenario_key=str(match.get("scenario_key") or ""))
+        rules = (scenario or {}).get("rules_json") or {}
+        if not isinstance(rules, dict):
+            rules = {}
+        scenario_kind = str(rules.get("engine") or "").strip().lower()
+        if not scenario_kind:
+            key = str(match.get("scenario_key") or "").lower()
+            if "werewolf" in key:
+                scenario_kind = "werewolf"
+            elif "blackjack" in key:
+                scenario_kind = "blackjack"
+            elif "holdem" in key or "hold'em" in key:
+                scenario_kind = "holdem"
+            else:
+                scenario_kind = "anaconda"
         state = match.get("state_json") or {}
         servers.append(
             {
                 "match_id": str(match.get("match_id") or ""),
                 "scenario_key": str(match.get("scenario_key") or ""),
+                "scenario_name": str((scenario or {}).get("name") or match.get("scenario_key") or "Scenario"),
+                "scenario_category": str((scenario or {}).get("category") or ""),
+                "scenario_kind": scenario_kind,
+                "ui_group": str(rules.get("ui_group") or ""),
                 "status": str(match.get("status") or ""),
                 "phase": str(match.get("phase") or ""),
                 "round_number": int(match.get("round_number") or 0),
@@ -366,13 +384,17 @@ def queue_leave(
 
 @router.post("/towns/{town_id}/advance")
 def advance_town_matches(town_id: str, steps: int = Query(default=1, ge=1, le=60)) -> dict[str, Any]:
-    # Admin/ops helper for manual advancement when no town ticks are running.
+    # Ops helper for manual advancement when no town ticks are running.
+    base_step = _current_step_for_town(town_id)
     matches = []
-    for i in range(max(1, int(steps))):
-        current = advance_matches(town_id=town_id, current_step=i + 1)
+    total_steps = max(1, int(steps))
+    for i in range(total_steps):
+        current = advance_matches(town_id=town_id, current_step=base_step + i + 1)
         matches = current
     return {
         "ok": True,
         "town_id": town_id,
+        "from_step": int(base_step),
+        "advanced_steps": int(total_steps),
         "matches": matches,
     }

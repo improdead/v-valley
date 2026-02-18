@@ -605,6 +605,58 @@ def _heuristic_anaconda_bet(context: dict[str, Any]) -> dict[str, Any]:
     return {"bet": bet, "fold": False, "all_in": False}
 
 
+def _heuristic_blackjack_bet(context: dict[str, Any]) -> dict[str, Any]:
+    stack = max(0, int(context.get("stack") or 0))
+    min_bet = max(1, int(context.get("min_bet") or 1))
+    max_bet = max(min_bet, int(context.get("max_bet") or min_bet))
+    hand_index = max(1, int(context.get("hand_index") or 1))
+    max_hands = max(hand_index, int(context.get("max_hands") or hand_index))
+    if stack <= 0:
+        return {"bet": 0}
+    if stack < min_bet:
+        return {"bet": stack}
+    progress = hand_index / max_hands
+    anchor = min_bet + int((max_bet - min_bet) * min(1.0, 0.2 + progress * 0.45))
+    conservative = max(min_bet, stack // 6)
+    proposed = max(min_bet, min(max_bet, max(anchor, conservative)))
+    return {"bet": min(stack, proposed)}
+
+
+def _heuristic_blackjack_action(context: dict[str, Any]) -> dict[str, Any]:
+    total = max(0, int(context.get("total") or 0))
+    dealer_upcard = str(context.get("dealer_upcard") or "").strip().upper()
+    can_double = bool(context.get("can_double"))
+    stack = max(0, int(context.get("stack") or 0))
+    bet = max(0, int(context.get("bet") or 0))
+    dealer_rank = dealer_upcard[0] if dealer_upcard else ""
+    dealer_strong = dealer_rank in {"7", "8", "9", "T", "J", "Q", "K", "A"}
+
+    if can_double and total in {10, 11} and stack >= bet:
+        return {"action": "double"}
+    if total <= 11:
+        return {"action": "hit"}
+    if total >= 17:
+        return {"action": "stand"}
+    if total >= 13 and not dealer_strong:
+        return {"action": "stand"}
+    return {"action": "hit"}
+
+
+def _heuristic_holdem_action(context: dict[str, Any]) -> dict[str, Any]:
+    to_call = max(0, int(context.get("to_call") or 0))
+    stack = max(0, int(context.get("stack") or 0))
+    can_raise = "raise" in [str(v).strip().lower() for v in (context.get("allowed_actions") or [])]
+    if to_call <= 0:
+        if can_raise and stack > int(context.get("bet_unit") or 10) * 2:
+            return {"action": "raise"}
+        return {"action": "check"}
+    if to_call > max(1, stack // 2):
+        return {"action": "fold"}
+    if can_raise and stack > to_call + int(context.get("bet_unit") or 10):
+        return {"action": "raise"}
+    return {"action": "call"}
+
+
 class CognitionPlanner:
     """Planner facade with situation-dependent policy routing."""
 
@@ -819,4 +871,28 @@ class CognitionPlanner:
             task_name="anaconda_pass",
             context=context,
             heuristic_fn=_heuristic_anaconda_pass_cards,
+        )
+
+    def blackjack_choose_bet(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Bet sizing choice for tournament blackjack hand start."""
+        return self._run_task(
+            task_name="blackjack_bet",
+            context=context,
+            heuristic_fn=_heuristic_blackjack_bet,
+        )
+
+    def blackjack_choose_action(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Hit/stand/double decision for blackjack player turns."""
+        return self._run_task(
+            task_name="blackjack_action",
+            context=context,
+            heuristic_fn=_heuristic_blackjack_action,
+        )
+
+    def holdem_choose_action(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Fixed-limit action decision for hold'em betting rounds."""
+        return self._run_task(
+            task_name="holdem_action",
+            context=context,
+            heuristic_fn=_heuristic_holdem_action,
         )
