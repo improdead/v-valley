@@ -497,10 +497,10 @@ def _specs() -> list[SpriteCrop]:
             "3": (124, 285, 175, 354),
             "4": (181, 285, 232, 354),
             "5": (238, 285, 288, 354),
-            "6": (294, 285, 345, 354),  # source sheet misses 6; use nearest card art
+            # 6 and 9 are missing from the source sheet.
+            # They are generated separately by scripts/fix_missing_hearts.py.
             "7": (294, 285, 345, 354),
             "8": (351, 285, 402, 354),
-            "9": (408, 285, 458, 354),  # source sheet misses 9; use nearest card art
             "T": (408, 285, 458, 354),
             "J": (464, 285, 515, 354),
             "Q": (521, 285, 572, 354),

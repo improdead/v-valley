@@ -119,10 +119,19 @@ function scenarioLabelFromKind(kind) {
 }
 
 function guessDefaultApiBase() {
+  const port = window.location.port;
   // If served directly from the API (port 8080), use same origin.
-  // If served via nginx reverse proxy (any other port), API routes are
-  // proxied under the same origin at /api/, so use same origin too.
-  return `${window.location.protocol}//${window.location.host}`;
+  if (port === "8080") {
+    return `${window.location.protocol}//${window.location.host}`;
+  }
+  // Standard HTTP/HTTPS ports (80/443 or empty) — likely behind nginx
+  // reverse proxy, so API is available at the same origin via /api/.
+  if (!port || port === "80" || port === "443") {
+    return `${window.location.protocol}//${window.location.host}`;
+  }
+  // Any other port (e.g. 3000 from manual `python3 -m http.server 3000`)
+  // — API is likely running separately on :8080 per documented defaults.
+  return `${window.location.protocol}//${window.location.hostname}:8080`;
 }
 
 function normalizeBase(raw) {
@@ -172,13 +181,22 @@ async function apiJson(path, opts = {}) {
     body = JSON.stringify(body);
   }
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), opts.timeout || 15000);
+  // Only apply hard timeout to safe (GET) requests.  Mutating requests
+  // (POST ticks, etc.) can legitimately run longer and aborting them
+  // client-side while the server continues causes state divergence.
+  const isSafe = method === "GET" || method === "HEAD";
+  const fetchOpts = { method, headers, body };
+  let timeoutId;
+  if (isSafe) {
+    const controller = new AbortController();
+    timeoutId = setTimeout(() => controller.abort(), opts.timeout || 15000);
+    fetchOpts.signal = controller.signal;
+  }
   let resp;
   try {
-    resp = await fetch(url, { method, headers, body, signal: controller.signal });
+    resp = await fetch(url, fetchOpts);
   } finally {
-    clearTimeout(timeoutId);
+    if (timeoutId) clearTimeout(timeoutId);
   }
   let payload;
   try {

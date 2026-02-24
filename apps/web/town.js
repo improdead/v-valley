@@ -204,13 +204,23 @@
   }
 
   async function apiFetch(path, opts) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    const method = (opts?.method || "GET").toUpperCase();
+    const isSafe = method === "GET" || method === "HEAD";
+    const fetchOpts = { ...opts };
+    let timeoutId;
+    // Only apply hard abort timeout to safe (GET) requests.
+    // Mutating requests (POST ticks) can run longer server-side and
+    // aborting them client-side causes state divergence on retry.
+    if (isSafe) {
+      const controller = new AbortController();
+      timeoutId = setTimeout(() => controller.abort(), 15000);
+      fetchOpts.signal = controller.signal;
+    }
     let res;
     try {
-      res = await fetch(`${API}${path}`, { ...opts, signal: controller.signal });
+      res = await fetch(`${API}${path}`, fetchOpts);
     } finally {
-      clearTimeout(timeoutId);
+      if (timeoutId) clearTimeout(timeoutId);
     }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
