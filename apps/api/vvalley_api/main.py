@@ -53,7 +53,13 @@ def _truthy_env(name: str, default: bool = False) -> bool:
 app = FastAPI(title="V-Valley API", version="0.1.0")
 
 _cors_origins = [o.strip() for o in os.environ.get("VVALLEY_CORS_ORIGINS", "*").split(",")]
-_cors_allow_credentials = "*" not in _cors_origins
+# SECURITY: never allow credentials with wildcard origin — if ANY entry is "*",
+# force credentials off and collapse origins to just ["*"].
+if "*" in _cors_origins:
+    _cors_origins = ["*"]
+    _cors_allow_credentials = False
+else:
+    _cors_allow_credentials = True
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,

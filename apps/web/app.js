@@ -119,10 +119,10 @@ function scenarioLabelFromKind(kind) {
 }
 
 function guessDefaultApiBase() {
-  if (window.location.port === "8080") {
-    return `${window.location.protocol}//${window.location.host}`;
-  }
-  return `${window.location.protocol}//${window.location.hostname}:8080`;
+  // If served directly from the API (port 8080), use same origin.
+  // If served via nginx reverse proxy (any other port), API routes are
+  // proxied under the same origin at /api/, so use same origin too.
+  return `${window.location.protocol}//${window.location.host}`;
 }
 
 function normalizeBase(raw) {
@@ -172,7 +172,14 @@ async function apiJson(path, opts = {}) {
     body = JSON.stringify(body);
   }
 
-  const resp = await fetch(url, { method, headers, body });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), opts.timeout || 15000);
+  let resp;
+  try {
+    resp = await fetch(url, { method, headers, body, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
   let payload;
   try {
     payload = await resp.json();
