@@ -204,7 +204,24 @@
   }
 
   async function apiFetch(path, opts) {
-    const res = await fetch(`${API}${path}`, opts);
+    const method = (opts?.method || "GET").toUpperCase();
+    const isSafe = method === "GET" || method === "HEAD";
+    const fetchOpts = { ...opts };
+    let timeoutId;
+    // Only apply hard abort timeout to safe (GET) requests.
+    // Mutating requests (POST ticks) can run longer server-side and
+    // aborting them client-side causes state divergence on retry.
+    if (isSafe) {
+      const controller = new AbortController();
+      timeoutId = setTimeout(() => controller.abort(), 15000);
+      fetchOpts.signal = controller.signal;
+    }
+    let res;
+    try {
+      res = await fetch(`${API}${path}`, fetchOpts);
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
@@ -1508,7 +1525,7 @@
     if (!asset) {
       return `<span class="ana-card-face ana-suit-${icon.cls}">${escapeHtml(rankLabel)}${icon.symbol}</span>`;
     }
-    return `<span class="ana-card-face-wrap"><img class="ana-card-face-image" src="${asset}" alt="${escapeHtml(raw)}" loading="lazy" decoding="async" onerror="this.style.display='none';this.nextElementSibling.style.display='inline-flex';" /><span class="ana-card-face ana-suit-${icon.cls}" style="display:none">${escapeHtml(rankLabel)}${icon.symbol}</span></span>`;
+    return `<span class="ana-card-face-wrap"><img class="ana-card-face-image" src="${asset}" alt="${escapeHtml(raw)}" loading="lazy" decoding="async" data-fallback="text" /><span class="ana-card-face ana-suit-${icon.cls}" style="display:none">${escapeHtml(rankLabel)}${icon.symbol}</span></span>`;
   }
 
   function renderWerewolfBoard(state, events) {
@@ -1589,6 +1606,7 @@
         ${cards}
       </div>
     `;
+    _attachImgFallbacks($matchModalBoard);
   }
 
   function holdemHoleToken(card) {
@@ -1597,6 +1615,24 @@
       return `<img class="ana-card-back" src="${scenarioArtRoot}/anaconda/cards/card_back.png" alt="hidden card" />`;
     }
     return anacondaCardToken(raw);
+  }
+
+  /** Attach safe fallback handlers to images with data-fallback attributes. */
+  function _attachImgFallbacks(container) {
+    if (!container) return;
+    container.querySelectorAll("img[data-fallback]").forEach((img) => {
+      img.addEventListener("error", function handler() {
+        img.removeEventListener("error", handler);
+        const fb = img.getAttribute("data-fallback");
+        if (fb === "text") {
+          img.style.display = "none";
+          const sibling = img.nextElementSibling;
+          if (sibling) sibling.style.display = "inline-flex";
+        } else if (fb) {
+          img.src = fb;
+        }
+      }, { once: true });
+    });
   }
 
   function renderBlackjackBoard(state) {
@@ -1640,8 +1676,8 @@
     $matchModalBoard.innerHTML = `
       <div class="scenario-board anaconda-board">
         <img class="ana-table-art" src="${scenarioArtRoot}/anaconda/board/poker_table.png" alt="table" />
-        <img class="ana-phase-art" src="${scenarioArtRoot}/blackjack/ui/actions_sheet.png" alt="blackjack actions" onerror="this.onerror=null;this.src='${scenarioArtRoot}/anaconda/ui/button_call.png';" />
-        <img class="ana-ranks-art" src="${scenarioArtRoot}/blackjack/icon.png" alt="blackjack icon" onerror="this.onerror=null;this.src='${scenarioArtRoot}/anaconda/icon.png';" />
+        <img class="ana-phase-art" src="${scenarioArtRoot}/blackjack/ui/actions_sheet.png" alt="blackjack actions" data-fallback="${scenarioArtRoot}/anaconda/ui/button_call.png" />
+        <img class="ana-ranks-art" src="${scenarioArtRoot}/blackjack/icon.png" alt="blackjack icon" data-fallback="${scenarioArtRoot}/anaconda/icon.png" />
         <div class="ana-pot"><img src="${anacondaChipAsset(state?.pot || 0)}" alt="chips" />Pot ${Number(state?.pot || 0)}</div>
         <div class="ana-phase">${escapeHtml(`HAND ${Number(bj.current_hand_index || 1)}/${Number(bj.max_hands || 1)}`)}</div>
         <div class="bj-dealer">
@@ -1652,6 +1688,7 @@
         ${cardsHtml}
       </div>
     `;
+    _attachImgFallbacks($matchModalBoard);
   }
 
   function renderHoldemBoard(state) {
@@ -1688,14 +1725,15 @@
     $matchModalBoard.innerHTML = `
       <div class="scenario-board anaconda-board">
         <img class="ana-table-art" src="${scenarioArtRoot}/anaconda/board/poker_table.png" alt="table" />
-        <img class="ana-phase-art" src="${scenarioArtRoot}/holdem/ui/markers_sheet.png" alt="holdem markers" onerror="this.onerror=null;this.src='${scenarioArtRoot}/shared/frames/badge_silver.png';" />
-        <img class="ana-ranks-art" src="${scenarioArtRoot}/holdem/icon.png" alt="holdem icon" onerror="this.onerror=null;this.src='${scenarioArtRoot}/anaconda/icon.png';" />
+        <img class="ana-phase-art" src="${scenarioArtRoot}/holdem/ui/markers_sheet.png" alt="holdem markers" data-fallback="${scenarioArtRoot}/shared/frames/badge_silver.png" />
+        <img class="ana-ranks-art" src="${scenarioArtRoot}/holdem/icon.png" alt="holdem icon" data-fallback="${scenarioArtRoot}/anaconda/icon.png" />
         <div class="ana-pot"><img src="${anacondaChipAsset(state?.pot || 0)}" alt="chips" />Pot ${Number(state?.pot || 0)}</div>
         <div class="ana-phase">${escapeHtml(String(state?.phase || "").toUpperCase())}</div>
         <div class="holdem-board-cards">${boardTokens}</div>
         ${cardsHtml}
       </div>
     `;
+    _attachImgFallbacks($matchModalBoard);
   }
 
   function showMatchSceneBanner(text) {
@@ -2406,6 +2444,12 @@
   $locationPanelClose?.addEventListener("click", closeLocationPanel);
 
   const urlTown = new URLSearchParams(window.location.search).get("town");
+
+  // Cleanup streams/polling on page unload to prevent leaked connections
+  window.addEventListener("beforeunload", () => {
+    stopStateStream();
+    stopPolling();
+  });
 
   loadTowns().then(() => {
     if (urlTown) {

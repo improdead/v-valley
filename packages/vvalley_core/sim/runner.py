@@ -1086,7 +1086,7 @@ class SimulationRunner:
                 a=a, b=b, step=step, town=town, cognition=cognition
             )
         except Exception:
-            pass
+            logger.debug("[RUNNER] Conversation generation failed for %s and %s", a.name, b.name, exc_info=True)
 
         # Final fallback
         return (
@@ -1223,7 +1223,7 @@ class SimulationRunner:
                         message = summary or f"{a.name} and {b.name} had a conversation."
                         return (message, transcript)
         except Exception:
-            pass
+            logger.debug("[RUNNER] Iterative conversation failed for %s and %s", a.name, b.name, exc_info=True)
 
         return (
             self._social_message(a=a, b=b, step=step),
@@ -1395,7 +1395,7 @@ class SimulationRunner:
             from packages.vvalley_core.maps.map_utils import build_spatial_metadata
             spatial_meta = build_spatial_metadata(map_data)
         except Exception:
-            pass
+            logger.warning("[RUNNER] Failed to build spatial metadata for town '%s'", town_id, exc_info=True)
 
         return TownRuntime(
             town_id=town_id,
@@ -2110,7 +2110,7 @@ class SimulationRunner:
                                 npc.memory.scratch.act_address = target_sector
                                 return self._avoid_occupied_tile(town=town, npc=npc, target=(x, y))
         except Exception:
-            pass
+            logger.debug("[RUNNER] Goal resolution failed for %s", npc.name, exc_info=True)
         return None
 
     def _update_object_state(
@@ -2144,7 +2144,7 @@ class SimulationRunner:
                     town.object_states[obj_key] = desc
                     return
             except Exception:
-                pass
+                logger.debug("[RUNNER] Object state LLM call failed for %s", npc.name, exc_info=True)
 
         # Heuristic fallback
         town.object_states[obj_key] = f"{obj} is being used by {npc.name}"
@@ -2199,7 +2199,7 @@ class SimulationRunner:
             if result.get("react"):
                 return str(result.get("new_action") or event_desc)
         except Exception:
-            pass
+            logger.debug("[RUNNER] Event reaction failed for %s", npc.name, exc_info=True)
         return None
 
     def _recompose_schedule_on_reaction(
@@ -2240,7 +2240,7 @@ class SimulationRunner:
                 npc.memory.scratch.daily_schedule = new_schedule
                 return True
         except Exception:
-            pass
+            logger.debug("[RUNNER] Schedule recomposition failed for %s", npc.name, exc_info=True)
         return False
 
     def _schedule_remaining_minutes(self, *, town: TownRuntime, npc: NpcState) -> int:
@@ -3678,13 +3678,33 @@ class SimulationRunner:
                     )
                 continue
 
+            prev_name = npc.name
             npc.name = str(member.get("name") or npc.name)
             npc.owner_handle = member.get("owner_handle")
             npc.claim_status = str(member.get("claim_status") or npc.claim_status)
+            # Detect rejoin: joined_at changed since last sync
+            prev_joined = npc.joined_at
             npc.joined_at = member.get("joined_at")
             npc.memory.agent_name = npc.name
             npc.memory.set_position(x=npc.x, y=npc.y, step=runtime.step)
             npc.memory.scratch.ensure_default_branches()
+            # If the agent rejoined (new joined_at timestamp), inject arrival events
+            if prev_joined and npc.joined_at and npc.joined_at != prev_joined:
+                for other_id, other_npc in runtime.npcs.items():
+                    if other_id == agent_id:
+                        continue
+                    other_npc.memory.add_node(
+                        kind="event",
+                        step=runtime.step,
+                        subject=npc.name,
+                        predicate="returned to",
+                        object="the valley",
+                        description=(
+                            f"{npc.name} has returned to the valley. "
+                            f"They seem happy to be back."
+                        ),
+                        poignancy=4,
+                    )
 
         runtime.updated_at = _utc_now()
         return runtime

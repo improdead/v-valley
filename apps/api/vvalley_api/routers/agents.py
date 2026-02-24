@@ -57,7 +57,19 @@ MAX_AGENTS_PER_TOWN = 25
 _WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
 
 _register_limiter = InMemoryRateLimiter(max_requests=50, window_seconds=3600)
+_claim_limiter = InMemoryRateLimiter(max_requests=20, window_seconds=600)  # 20 attempts per 10 min
 _AUTO_TOWN_LOCK = threading.Lock()
+# Per-town lock for join operations (capacity check + sprite assignment + join)
+_TOWN_JOIN_LOCKS: dict[str, threading.Lock] = {}
+_TOWN_JOIN_LOCKS_GUARD = threading.Lock()
+
+
+def _town_join_lock(town_id: str) -> threading.Lock:
+    """Get or create a per-town lock for serializing join operations."""
+    with _TOWN_JOIN_LOCKS_GUARD:
+        if town_id not in _TOWN_JOIN_LOCKS:
+            _TOWN_JOIN_LOCKS[town_id] = threading.Lock()
+        return _TOWN_JOIN_LOCKS[town_id]
 
 
 def _auto_create_town() -> str | None:
@@ -304,8 +316,12 @@ def register_agent_endpoint(req: RegisterAgentRequest, request: Request) -> dict
 
 
 @router.post("/claim")
-def claim_agent_endpoint(req: ClaimAgentRequest) -> dict[str, Any]:
-    logger.info("[AGENTS] Claim attempt: claim_token='%s...', owner_handle='%s'", 
+def claim_agent_endpoint(req: ClaimAgentRequest, request: Request) -> dict[str, Any]:
+    client_ip = request.client.host if request.client else "unknown"
+    if not _claim_limiter.check(client_ip):
+        raise HTTPException(status_code=429, detail="Too many claim attempts. Try again later.")
+
+    logger.info("[AGENTS] Claim attempt: claim_token='%s...', owner_handle='%s'",
                 req.claim_token[:20] if req.claim_token else "", req.owner_handle)
     
     try:
@@ -452,39 +468,46 @@ def join_town(req: JoinTownRequest, authorization: Optional[str] = Header(defaul
         logger.warning("[AGENTS] Join town failed - town not found: town_id='%s'", town_id)
         raise HTTPException(status_code=404, detail=f"Town not found: {town_id}")
 
-    current_town = get_agent_town(agent_id=agent["id"])
-    if not current_town or current_town.get("town_id") != town_id:
-        current_count = count_active_agents_in_town(town_id)
-        if current_count >= MAX_AGENTS_PER_TOWN:
-            logger.warning("[AGENTS] Join town failed - town full: town_id='%s', current=%d, max=%d",
-                          town_id, current_count, MAX_AGENTS_PER_TOWN)
-            raise HTTPException(
-                status_code=409,
-                detail=f"Town is full (max {MAX_AGENTS_PER_TOWN} agents): {town_id}",
-            )
+    # Serialize capacity check + sprite assignment + join under per-town lock
+    lock = _town_join_lock(town_id)
+    if not lock.acquire(timeout=5):
+        raise HTTPException(status_code=503, detail="Town join busy, please retry",
+                            headers={"Retry-After": "2"})
+    try:
+        current_town = get_agent_town(agent_id=agent["id"])
+        if not current_town or current_town.get("town_id") != town_id:
+            current_count = count_active_agents_in_town(town_id)
+            if current_count >= MAX_AGENTS_PER_TOWN:
+                logger.warning("[AGENTS] Join town failed - town full: town_id='%s', current=%d, max=%d",
+                              town_id, current_count, MAX_AGENTS_PER_TOWN)
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Town is full (max {MAX_AGENTS_PER_TOWN} agents): {town_id}",
+                )
 
-    # --- ensure unique sprite in town ---
-    members = list_active_agents_in_town(town_id)
-    used_sprites = {
-        m.get("sprite_name") for m in members
-        if m.get("sprite_name") and str(m.get("agent_id")) != str(agent["id"])
-    }
-    agent_sprite = agent.get("sprite_name")
-    if agent_sprite in used_sprites:
-        # Pick an unused sprite
-        available = [s for s in CHARACTER_SPRITES if s not in used_sprites]
-        if available:
-            agent_sprite = random.choice(available)
-            update_agent_sprite(agent_id=str(agent["id"]), sprite_name=agent_sprite)
-            logger.info("[AGENTS] Reassigned sprite for agent %s to '%s' (original was taken)", agent["id"], agent_sprite)
-        else:
-            logger.warning("[AGENTS] All sprites taken in town '%s'", town_id)
+        # --- ensure unique sprite in town ---
+        members = list_active_agents_in_town(town_id)
+        used_sprites = {
+            m.get("sprite_name") for m in members
+            if m.get("sprite_name") and str(m.get("agent_id")) != str(agent["id"])
+        }
+        agent_sprite = agent.get("sprite_name")
+        if agent_sprite in used_sprites:
+            available = [s for s in CHARACTER_SPRITES if s not in used_sprites]
+            if available:
+                agent_sprite = random.choice(available)
+                update_agent_sprite(agent_id=str(agent["id"]), sprite_name=agent_sprite)
+                logger.info("[AGENTS] Reassigned sprite for agent %s to '%s' (original was taken)", agent["id"], agent_sprite)
+            else:
+                logger.warning("[AGENTS] All sprites taken in town '%s'", town_id)
 
-    membership = join_agent_town(agent_id=agent["id"], town_id=town_id)
-    if not membership:
-        logger.error("[AGENTS] Join town failed - membership creation failed: agent_id=%s, town_id='%s'",
-                    agent["id"], town_id)
-        raise HTTPException(status_code=404, detail="Agent not found")
+        membership = join_agent_town(agent_id=agent["id"], town_id=town_id)
+        if not membership:
+            logger.error("[AGENTS] Join town failed - membership creation failed: agent_id=%s, town_id='%s'",
+                        agent["id"], town_id)
+            raise HTTPException(status_code=404, detail="Agent not found")
+    finally:
+        lock.release()
 
     logger.info("[AGENTS] Agent joined town successfully: agent_id=%s, agent_name='%s', town_id='%s'",
                 agent["id"], agent["name"], town_id)
@@ -563,23 +586,34 @@ def auto_join_town(authorization: Optional[str] = Header(default=None)) -> dict[
         best_town = new_town_id
         best_pop = 0
 
-    # Ensure unique sprite in the target town
-    members = list_active_agents_in_town(best_town)
-    used_sprites = {
-        m.get("sprite_name") for m in members
-        if m.get("sprite_name") and str(m.get("agent_id")) != str(agent["id"])
-    }
-    agent_sprite = agent.get("sprite_name")
-    if agent_sprite in used_sprites:
-        available = [s for s in CHARACTER_SPRITES if s not in used_sprites]
-        if available:
-            agent_sprite = random.choice(available)
-            update_agent_sprite(agent_id=str(agent["id"]), sprite_name=agent_sprite)
-            logger.info("[AGENTS] Auto-join reassigned sprite for agent %s to '%s'", agent["id"], agent_sprite)
+    # Serialize sprite assignment + join under per-town lock
+    lock = _town_join_lock(best_town)
+    if not lock.acquire(timeout=5):
+        raise HTTPException(status_code=503, detail="Town join busy, please retry",
+                            headers={"Retry-After": "2"})
+    try:
+        # Re-check capacity under lock (may have changed since selection above)
+        if count_active_agents_in_town(best_town) >= MAX_AGENTS_PER_TOWN:
+            raise HTTPException(status_code=409, detail="Town filled while waiting, please retry")
 
-    membership = join_agent_town(agent_id=agent["id"], town_id=best_town)
-    if not membership:
-        raise HTTPException(status_code=500, detail="Failed to join town")
+        members = list_active_agents_in_town(best_town)
+        used_sprites = {
+            m.get("sprite_name") for m in members
+            if m.get("sprite_name") and str(m.get("agent_id")) != str(agent["id"])
+        }
+        agent_sprite = agent.get("sprite_name")
+        if agent_sprite in used_sprites:
+            available = [s for s in CHARACTER_SPRITES if s not in used_sprites]
+            if available:
+                agent_sprite = random.choice(available)
+                update_agent_sprite(agent_id=str(agent["id"]), sprite_name=agent_sprite)
+                logger.info("[AGENTS] Auto-join reassigned sprite for agent %s to '%s'", agent["id"], agent_sprite)
+
+        membership = join_agent_town(agent_id=agent["id"], town_id=best_town)
+        if not membership:
+            raise HTTPException(status_code=500, detail="Failed to join town")
+    finally:
+        lock.release()
 
     logger.info("[AGENTS] Auto-joined: agent_id=%s, town_id='%s' (pop=%d)", agent["id"], best_town, best_pop)
     return {
@@ -624,11 +658,21 @@ def leave_town(authorization: Optional[str] = Header(default=None)) -> dict[str,
     logger.debug("[AGENTS] Agent leaving town: agent_id=%s, name='%s', town_id='%s'", agent["id"], agent["name"], town_id)
 
     # 1. Evict from simulation + inject departure events into remaining agents
+    eviction_ok = False
     try:
         from packages.vvalley_core.sim.runner import evict_agent_from_town
         evict_agent_from_town(town_id=town_id, agent_id=str(agent["id"]))
+        eviction_ok = True
     except Exception:
-        logger.exception("[AGENTS] Failed to evict agent from runtime (will be cleaned up lazily)")
+        logger.exception("[AGENTS] Failed to evict agent from runtime — aborting leave to prevent orphaned NPC")
+
+    if not eviction_ok:
+        # Don't clear membership if runtime eviction failed — prevents orphaned NPC
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to evict from simulation. Please retry.",
+            headers={"Retry-After": "3"},
+        )
 
     # 2. Close DM conversations involving this agent
     try:
@@ -636,7 +680,7 @@ def leave_town(authorization: Optional[str] = Header(default=None)) -> dict[str,
     except Exception:
         logger.exception("[AGENTS] Failed to close DM conversations on leave")
 
-    # 3. Remove membership
+    # 3. Remove membership (only after successful eviction)
     left = leave_agent_town(agent_id=agent["id"])
     if left:
         logger.info("[AGENTS] Agent left town successfully: agent_id=%s, name='%s'", agent["id"], agent["name"])
