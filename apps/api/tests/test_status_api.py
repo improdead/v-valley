@@ -18,6 +18,10 @@ os.environ["VVALLEY_DB_PATH"] = str(TEST_DB_PATH)
 
 from apps.api.vvalley_api.main import app
 from apps.api.vvalley_api.routers.agents import reset_rate_limiter_for_tests as reset_rate_limiter
+from apps.api.vvalley_api.services.system_status import (
+    MetricsCollector,
+    reset_metrics_collector_for_tests,
+)
 from apps.api.vvalley_api.storage.agents import reset_backend_cache_for_tests as reset_agents_backend
 from apps.api.vvalley_api.storage.interaction_hub import reset_backend_cache_for_tests as reset_interaction_backend
 from apps.api.vvalley_api.storage.llm_control import reset_backend_cache_for_tests as reset_llm_backend
@@ -38,6 +42,7 @@ class StatusApiTests(unittest.TestCase):
         reset_interaction_backend()
         reset_scenarios_backend()
         reset_rate_limiter()
+        reset_metrics_collector_for_tests()
         self.client = TestClient(app)
 
     def test_api_health_returns_extended_status(self) -> None:
@@ -85,6 +90,94 @@ class StatusApiTests(unittest.TestCase):
         self.assertEqual(payload["total_lines_of_code"], 321)
         self.assertEqual(payload["last_git_commit"]["hash"], "abc123")
         mock_stats.assert_called_once_with(ROOT)
+
+    def test_metrics_collector_tracks_counts_average_and_errors(self) -> None:
+        collector = MetricsCollector()
+
+        collector.record("GET /api/health", response_time_ms=10.0, status_code=200)
+        collector.record("GET /api/health", response_time_ms=20.0, status_code=500)
+        collector.record("GET /api/stats", response_time_ms=5.0, status_code=200)
+
+        payload = collector.snapshot()
+
+        self.assertEqual(
+            payload,
+            [
+                {
+                    "endpoint": "GET /api/health",
+                    "request_count": 2,
+                    "average_response_time_ms": 15.0,
+                    "error_count": 1,
+                    "error_rate": 0.5,
+                },
+                {
+                    "endpoint": "GET /api/stats",
+                    "request_count": 1,
+                    "average_response_time_ms": 5.0,
+                    "error_count": 0,
+                    "error_rate": 0.0,
+                },
+            ],
+        )
+
+    def test_api_metrics_reports_tracked_requests(self) -> None:
+        with patch("apps.api.vvalley_api.main.monotonic_time", side_effect=[1.0, 1.010, 2.0, 2.030]):
+            health_resp = self.client.get("/api/health")
+            missing_resp = self.client.get("/does-not-exist")
+
+        self.assertEqual(health_resp.status_code, 200)
+        self.assertEqual(missing_resp.status_code, 404)
+
+        resp = self.client.get("/api/metrics")
+
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertIn("timestamp", payload)
+        self.assertEqual(
+            payload["endpoints"],
+            [
+                {
+                    "endpoint": "GET /api/health",
+                    "request_count": 1,
+                    "average_response_time_ms": 10.0,
+                    "error_count": 0,
+                    "error_rate": 0.0,
+                },
+                {
+                    "endpoint": "GET /does-not-exist",
+                    "request_count": 1,
+                    "average_response_time_ms": 30.0,
+                    "error_count": 1,
+                    "error_rate": 1.0,
+                },
+            ],
+        )
+
+    def test_api_metrics_increments_request_counts_for_repeated_endpoint_calls(self) -> None:
+        with patch(
+            "apps.api.vvalley_api.main.monotonic_time",
+            side_effect=[1.0, 1.010, 2.0, 2.020, 3.0, 3.030],
+        ):
+            first = self.client.get("/api/health")
+            second = self.client.get("/api/health")
+            metrics = self.client.get("/api/metrics")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(metrics.status_code, 200)
+        self.assertEqual(
+            metrics.json()["endpoints"],
+            [
+                {
+                    "endpoint": "GET /api/health",
+                    "request_count": 2,
+                    "average_response_time_ms": 15.0,
+                    "error_count": 0,
+                    "error_rate": 0.0,
+                },
+            ],
+        )
 
     def test_stats_payload_helpers_skip_excluded_directories(self) -> None:
         from apps.api.vvalley_api.services.system_status import get_file_count_by_extension, get_total_lines_of_code

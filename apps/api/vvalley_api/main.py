@@ -27,7 +27,14 @@ from .services.runtime_scheduler import (
     start_town_runtime_scheduler,
     stop_town_runtime_scheduler,
 )
-from .services.system_status import get_health_payload, get_stats_payload
+from .services.system_status import (
+    get_health_payload,
+    get_metrics_payload,
+    get_stats_payload,
+    get_metrics_collector,
+    monotonic_time,
+    should_track_metrics,
+)
 from .storage.agents import init_db as init_agents_db
 from .storage.interaction_hub import init_db as init_interaction_hub_db
 from .storage.llm_control import init_db as init_llm_db
@@ -78,6 +85,27 @@ app.include_router(legacy_router)
 app.include_router(sim_router)
 app.include_router(llm_router)
 app.include_router(scenarios_router)
+
+
+@app.middleware("http")
+async def collect_request_metrics(request: Request, call_next):
+    start = monotonic_time()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        if should_track_metrics(request.url.path):
+            duration_ms = (monotonic_time() - start) * 1000.0
+            route = request.scope.get("route")
+            route_path = getattr(route, "path", None) or request.url.path
+            endpoint = f"{request.method} {route_path}"
+            get_metrics_collector().record(
+                endpoint=endpoint,
+                response_time_ms=duration_ms,
+                status_code=status_code,
+            )
 
 
 @app.exception_handler(SimulationBusyError)
@@ -247,6 +275,12 @@ def api_health() -> dict:
 def api_stats() -> dict:
     logger.debug("[API_STATS] Repository stats requested")
     return get_stats_payload(_WORKSPACE_ROOT)
+
+
+@app.get("/api/metrics")
+def api_metrics() -> dict:
+    logger.debug("[API_METRICS] Request metrics requested")
+    return get_metrics_payload()
 
 
 def _skill_md_text(base_url: str) -> str:

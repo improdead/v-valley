@@ -4,7 +4,10 @@ import os
 import resource
 import subprocess
 import sys
+import threading
+import time
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -45,8 +48,83 @@ _CODE_EXTENSIONS = {
 }
 
 
+@dataclass
+class EndpointMetrics:
+    request_count: int = 0
+    total_response_time_ms: float = 0.0
+    error_count: int = 0
+
+    def record(self, response_time_ms: float, is_error: bool) -> None:
+        self.request_count += 1
+        self.total_response_time_ms += response_time_ms
+        if is_error:
+            self.error_count += 1
+
+    def to_payload(self, endpoint: str) -> dict[str, Any]:
+        average_response_time_ms = 0.0
+        if self.request_count:
+            average_response_time_ms = self.total_response_time_ms / self.request_count
+        error_rate = 0.0
+        if self.request_count:
+            error_rate = self.error_count / self.request_count
+        return {
+            "endpoint": endpoint,
+            "request_count": self.request_count,
+            "average_response_time_ms": round(average_response_time_ms, 3),
+            "error_count": self.error_count,
+            "error_rate": round(error_rate, 6),
+        }
+
+
+class MetricsCollector:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._metrics: dict[str, EndpointMetrics] = {}
+
+    def record(self, endpoint: str, response_time_ms: float, status_code: int) -> None:
+        with self._lock:
+            metrics = self._metrics.setdefault(endpoint, EndpointMetrics())
+            metrics.record(response_time_ms=response_time_ms, is_error=status_code >= 400)
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                self._metrics[endpoint].to_payload(endpoint)
+                for endpoint in sorted(self._metrics)
+            ]
+
+    def reset(self) -> None:
+        with self._lock:
+            self._metrics.clear()
+
+
+_METRICS_COLLECTOR = MetricsCollector()
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def monotonic_time() -> float:
+    return time.perf_counter()
+
+
+def get_metrics_collector() -> MetricsCollector:
+    return _METRICS_COLLECTOR
+
+
+def reset_metrics_collector_for_tests() -> None:
+    _METRICS_COLLECTOR.reset()
+
+
+def should_track_metrics(path: str) -> bool:
+    return path not in {
+        "/api/metrics",
+        "/openapi.json",
+        "/docs",
+        "/docs/oauth2-redirect",
+        "/redoc",
+    }
 
 
 def get_uptime_seconds(now: datetime | None = None) -> float:
@@ -155,4 +233,13 @@ def get_stats_payload(root: Path) -> dict[str, Any]:
         "file_count_by_extension": get_file_count_by_extension(root),
         "total_lines_of_code": get_total_lines_of_code(root),
         "last_git_commit": get_last_git_commit(root),
+    }
+
+
+def get_metrics_payload() -> dict[str, Any]:
+    now = utc_now()
+    return {
+        "status": "ok",
+        "timestamp": format_timestamp(now),
+        "endpoints": get_metrics_collector().snapshot(),
     }
