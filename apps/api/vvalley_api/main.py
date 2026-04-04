@@ -27,6 +27,7 @@ from .services.runtime_scheduler import (
     start_town_runtime_scheduler,
     stop_town_runtime_scheduler,
 )
+from .services.system_status import get_health_payload, get_stats_payload
 from .storage.agents import init_db as init_agents_db
 from .storage.interaction_hub import init_db as init_interaction_hub_db
 from .storage.llm_control import init_db as init_llm_db
@@ -234,6 +235,18 @@ def healthz() -> dict[str, str]:
         logger.warning("[HEALTH] DB ping failed: %s", exc)
         return JSONResponse(status_code=503, content={"status": "error", "detail": str(exc)})
     return {"status": "ok"}
+
+
+@app.get("/api/health")
+def api_health() -> dict:
+    logger.debug("[API_HEALTH] Extended health check requested")
+    return get_health_payload()
+
+
+@app.get("/api/stats")
+def api_stats() -> dict:
+    logger.debug("[API_STATS] Repository stats requested")
+    return get_stats_payload(_WORKSPACE_ROOT)
 
 
 def _skill_md_text(base_url: str) -> str:
